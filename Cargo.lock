@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "oxidarr"
+version = "0.0.0"
+
+[[package]]
 name = "oxidarr-cardigann"
 version = "0.0.0"
 
