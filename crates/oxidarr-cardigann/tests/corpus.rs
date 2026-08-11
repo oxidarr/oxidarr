@@ -66,3 +66,61 @@ fn every_definition_is_valid_yaml() {
         failures.join("\n")
     );
 }
+
+/// Recursively collects every `selector:` string in a definition.
+fn collect_selectors(node: &serde_yaml_ng::Value, out: &mut Vec<String>) {
+    match node {
+        serde_yaml_ng::Value::Mapping(map) => {
+            for (k, v) in map {
+                if k.as_str() == Some("selector") && let Some(s) = v.as_str() {
+                    out.push(s.to_string());
+                }
+                collect_selectors(v, out);
+            }
+        }
+        serde_yaml_ng::Value::Sequence(seq) => {
+            for v in seq {
+                collect_selectors(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn every_selector_parses_as_standard_css() {
+    let mut total = 0usize;
+    let mut failed = Vec::new();
+
+    for path in definition_paths() {
+        let raw = std::fs::read_to_string(&path).unwrap();
+        // Strip BOM if present (some files have UTF-8 BOM)
+        let content = raw.trim_start_matches('\u{FEFF}');
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(content).unwrap();
+        let mut selectors = Vec::new();
+        collect_selectors(&doc, &mut selectors);
+
+        for sel in selectors {
+            total += 1;
+            // Templated selectors are resolved at runtime, not parse time.
+            if sel.contains("{{") {
+                continue;
+            }
+            if scraper::Selector::parse(&sel).is_err() {
+                failed.push(sel);
+            }
+        }
+    }
+
+    assert!(
+        failed.is_empty(),
+        "{} of {total} selectors do not parse as standard CSS. Examples:\n{}",
+        failed.len(),
+        failed
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
