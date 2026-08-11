@@ -11,4 +11,7 @@
 /dist
 .dioxus/
 
+# local working notes, never published
+/.local/
+
 .DS_Store
