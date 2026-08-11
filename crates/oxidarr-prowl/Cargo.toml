@@ -1,0 +1,19 @@
+[package]
+name = "oxidarr-prowl"
+description = "Prowlarr-compatible indexer manager, in Rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "oxidarr_prowl"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oxidarr-prowl"
+path = "src/main.rs"
+
+[dependencies]

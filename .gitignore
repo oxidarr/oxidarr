@@ -1,0 +1,14 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# sqlx offline query cache is committed on purpose; local db files are not
+*.db
+*.db-shm
+*.db-wal
+
+# dioxus
+/dist
+.dioxus/
+
+.DS_Store

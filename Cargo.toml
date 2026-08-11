@@ -1,0 +1,60 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "GPL-3.0-only"
+repository = "https://github.com/oxidarr/oxidarr"
+authors = ["Filipe Brito Ferreira"]
+
+[workspace.dependencies]
+# internal
+oxidarr-core = { path = "crates/oxidarr-core", version = "0.0.0" }
+oxidarr-db = { path = "crates/oxidarr-db", version = "0.0.0" }
+oxidarr-cardigann = { path = "crates/oxidarr-cardigann", version = "0.0.0" }
+oxidarr-indexer = { path = "crates/oxidarr-indexer", version = "0.0.0" }
+oxidarr-http = { path = "crates/oxidarr-http", version = "0.0.0" }
+
+# runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["trace", "cors", "compression-gzip"] }
+
+# data
+sqlx = { version = "0.8", default-features = false, features = [
+  "runtime-tokio",
+  "sqlite",
+  "macros",
+  "migrate",
+  "chrono",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+
+# indexer stack
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
+  "cookies",
+  "gzip",
+  "json",
+  "socks",
+] }
+scraper = "0.27"
+quick-xml = { version = "0.38", features = ["serialize"] }
+regex = "1"
+url = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# diagnostics
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
