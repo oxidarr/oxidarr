@@ -4,6 +4,11 @@
 use std::path::{Path, PathBuf};
 
 /// Locates `.definitions/v11` by walking up from the crate directory.
+///
+/// # Panics
+///
+/// Panics if `.definitions/v11` is not found in any parent directory.
+#[must_use]
 pub fn corpus_dir() -> PathBuf {
     let mut dir: &Path = Path::new(env!("CARGO_MANIFEST_DIR"));
     loop {
@@ -17,6 +22,12 @@ pub fn corpus_dir() -> PathBuf {
     }
 }
 
+/// Returns all `.yml` file paths in the corpus directory, sorted.
+///
+/// # Panics
+///
+/// Panics if the corpus directory is not readable.
+#[must_use]
 pub fn definition_paths() -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(corpus_dir())
         .expect("corpus directory is readable")
@@ -49,5 +60,9 @@ fn every_definition_is_valid_yaml() {
             failures.push(format!("{}: {e}", path.display()));
         }
     }
-    assert!(failures.is_empty(), "invalid YAML:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "invalid YAML:\n{}",
+        failures.join("\n")
+    );
 }
