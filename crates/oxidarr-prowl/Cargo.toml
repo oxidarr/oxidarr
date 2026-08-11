@@ -17,3 +17,6 @@ name = "oxidarr-prowl"
 path = "src/main.rs"
 
 [dependencies]
+
+[lints]
+workspace = true

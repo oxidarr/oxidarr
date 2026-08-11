@@ -24,7 +24,7 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["trace", "cors", "compression-gzip"] }
 
 # data
-sqlx = { version = "0.8", default-features = false, features = [
+sqlx = { version = "0.9", default-features = false, features = [
   "runtime-tokio",
   "sqlite",
   "macros",
@@ -44,7 +44,7 @@ reqwest = { version = "0.12", default-features = false, features = [
   "socks",
 ] }
 scraper = "0.27"
-quick-xml = { version = "0.38", features = ["serialize"] }
+quick-xml = { version = "0.41", features = ["serialize"] }
 regex = "1"
 url = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
@@ -53,6 +53,17 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
 
 [profile.release]
 lto = true

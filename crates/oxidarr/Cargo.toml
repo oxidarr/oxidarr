@@ -12,3 +12,6 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+
+[lints]
+workspace = true
