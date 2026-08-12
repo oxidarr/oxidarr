@@ -143,7 +143,13 @@ pub fn compile(raw: &str) -> Result<CompiledSelector, CardigannError> {
     }
 
     let normalized = rewrite_not_equal(raw);
-    let branches = split_top_level_commas(&normalized)
+    let normalized = normalize_attribute_selectors(&normalized);
+    // A leading `$` that isn't a JSON root path (handled above) has no
+    // meaning in CSS — it can't be part of an attribute's `$=` operator,
+    // since nothing precedes it — and shows up in a couple of definitions
+    // as a stray leftover. Drop it.
+    let normalized = normalized.strip_prefix('$').unwrap_or(&normalized);
+    let branches = split_top_level_commas(normalized)
         .into_iter()
         .map(|part| compile_branch(part, raw))
         .collect::<Result<Vec<_>, _>>()?;
@@ -442,6 +448,55 @@ fn rewrite_not_equal(s: &str) -> String {
     output
 }
 
+/// Normalizes every `[...]` attribute-selector body in `s` (see
+/// [`normalize_attribute_value`]).
+fn normalize_attribute_selectors(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&rest[..=open]);
+        rest = &rest[open + 1..];
+        let Some(close) = rest.find(']') else {
+            out.push_str(rest);
+            return out;
+        };
+        out.push_str(&normalize_attribute_value(&rest[..close]));
+        out.push(']');
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Normalizes a single `attr`, `attr=value`, `attr^=value`, ...
+/// attribute-selector body, fixing two malformations observed in the
+/// corpus:
+///
+/// - A value that *starts* with `\"` or `\'`. A value can never validly
+///   begin with an escaped quote (there is nothing before it to escape),
+///   so this only happens when a definition was written as if the whole
+///   selector needed double-quoted-YAML-style escaping even though nothing
+///   ever opens a real quote — e.g. `[src$=\"/x.gif\"]` instead of
+///   `[src$="/x.gif"]`. Every backslash-quote pair in the body is spurious
+///   in that case and is flattened to a plain quote.
+/// - An unquoted value that starts with a digit, e.g. `[border=1]`. A bare
+///   CSS identifier can't start with a digit, so `Selector::parse` rejects
+///   it; `[border="1"]` is what was meant.
+fn normalize_attribute_value(inner: &str) -> String {
+    let Some(op_end) = inner.find('=') else {
+        return inner.to_string();
+    };
+    let value = &inner[op_end + 1..];
+
+    if value.starts_with("\\\"") || value.starts_with("\\'") {
+        return inner.replace("\\\"", "\"").replace("\\'", "'");
+    }
+    if value.starts_with(|c: char| c.is_ascii_digit()) {
+        return format!("{}\"{value}\"", &inner[..=op_end]);
+    }
+    inner.to_string()
+}
+
 /// Returns true if `s` is a JSON field-path selector (`$`, `$.field`,
 /// `$[0].id`, `..field`, `items[0].name`) rather than a CSS selector. These
 /// appear in Cardigann definitions whose search response is JSON.
@@ -582,5 +637,18 @@ mod tests {
         assert_eq!(ids("$.numFound"), Vec::<String>::new());
         assert_eq!(ids("files[0].name"), Vec::<String>::new());
         assert_eq!(ids("..title"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn empty_contains_argument_matches_everything() {
+        // A `:contains()` with no argument (left behind when a template
+        // placeholder is stripped out before the value is known at render
+        // time) must match every element of the given type, since an empty
+        // string is contained in any text.
+        let doc = Html::parse_document(HTML);
+        let root = doc.root_element();
+        let matched = compile("td:contains()").unwrap().select(root);
+        assert_eq!(matched.len(), 2);
+        assert!(matched.iter().all(|el| el.value().name() == "td"));
     }
 }

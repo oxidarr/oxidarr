@@ -72,6 +72,78 @@ fn every_definition_is_valid_yaml() {
     );
 }
 
+/// Why a call to [`strip_spans`] stopped consuming input.
+enum Stop {
+    /// Hit a `{{ else }}` belonging to an enclosing `{{ if }}`.
+    Else,
+    /// Hit a `{{ end }}` belonging to an enclosing `{{ if }}`.
+    End,
+    /// Ran out of input.
+    Eof,
+}
+
+/// Removes every `{{ ... }}` span from `sel`, returning the residual
+/// string.
+///
+/// A bare action (typically a value interpolation, e.g.
+/// `{{ .Config.uploader }}`) contributes nothing. An `{{ if COND }}...{{ end }}`
+/// or `{{ if COND }}...{{ else }}...{{ end }}` keeps only the `if` branch
+/// and drops the `else` branch entirely, rather than concatenating both —
+/// concatenating two alternative selector fragments is not valid CSS even
+/// though each fragment, alone, would be. Handles multiple and nested
+/// spans. A span that is never closed, or an `if` never closed by a
+/// matching `end`, drops everything from that point to the end of the
+/// string rather than panicking or looping forever.
+fn strip_template_spans(sel: &str) -> String {
+    let (mut out, stop, remainder) = strip_spans(sel);
+    if !matches!(stop, Stop::Eof) {
+        // A stray `else`/`end` with no enclosing `if` at this level: keep
+        // processing rather than silently dropping the remainder.
+        out.push_str(&strip_template_spans(remainder));
+    }
+    out
+}
+
+/// Consumes `s` up to (and past) the first `{{ else }}` or `{{ end }}` that
+/// has no enclosing `{{ if }}` opened *within this call*, or to the end of
+/// `s` if neither appears. Every `{{ if COND }}` encountered is resolved
+/// recursively before the scan continues.
+fn strip_spans(s: &str) -> (String, Stop, &str) {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    loop {
+        let Some(start) = rest.find("{{") else {
+            out.push_str(rest);
+            return (out, Stop::Eof, "");
+        };
+        out.push_str(&rest[..start]);
+        let after_open = &rest[start + 2..];
+        let Some(close) = after_open.find("}}") else {
+            return (out, Stop::Eof, "");
+        };
+        let action = after_open[..close].trim();
+        let after_action = &after_open[close + 2..];
+
+        if action == "else" {
+            return (out, Stop::Else, after_action);
+        }
+        if action == "end" {
+            return (out, Stop::End, after_action);
+        }
+        if action.starts_with("if") {
+            let (branch, stop, remainder) = strip_spans(after_action);
+            out.push_str(&branch);
+            rest = match stop {
+                Stop::Else => strip_spans(remainder).2,
+                Stop::End | Stop::Eof => remainder,
+            };
+        } else {
+            // Any other bare action contributes nothing.
+            rest = after_action;
+        }
+    }
+}
+
 /// Recursively collects every `selector:` string in a definition.
 fn collect_selectors(node: &serde_yaml_ng::Value, out: &mut Vec<String>) {
     match node {
@@ -106,11 +178,14 @@ fn every_selector_parses_as_standard_css() {
 
         for sel in selectors {
             total += 1;
-            // Templated selectors cannot be parsed until they are rendered.
-            // A literal `:contains(` in one is still broken once it is, so
-            // count those rather than letting them escape the gate.
+            // Templated selectors cannot be parsed until they are rendered,
+            // and no template engine exists until Task 4. Neutralise the
+            // `{{ ... }}` spans and require the residual selector to compile:
+            // that still exercises the `:contains()` rewriting on them, so
+            // none escapes the gate, and the gate stays satisfiable.
             if sel.contains("{{") {
-                if sel.contains(":contains(") {
+                let stripped = strip_template_spans(&sel);
+                if oxidarr_cardigann::selector::compile(&stripped).is_err() {
                     failed.push(sel);
                 }
                 continue;
