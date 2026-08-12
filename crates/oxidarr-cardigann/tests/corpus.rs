@@ -438,16 +438,36 @@ mod template_span_tests {
 }
 
 /// Recursively collects the `name` of every entry under a `filters:` or
-/// `dateheaders:` sequence in a definition — the two places Cardigann
-/// definitions invoke filter functions. Other `name:` fields in a
-/// definition (settings, login inputs, category names, …) are not filter
-/// invocations and must not be collected.
+/// `keywordsfilters:` sequence in a definition, which — together with
+/// `dateheaders:`'s *nested* `filters:` key, picked up transitively by the
+/// same `"filters"` match during recursion rather than by matching
+/// `"dateheaders"` itself — are every place Cardigann definitions invoke
+/// filter functions.
+///
+/// `dateheaders:`'s value is a mapping (`{selector, filters}`), never a
+/// sequence, so the `"dateheaders"` arm of the `matches!` below never
+/// actually fires its `v.as_sequence()` branch; it is kept anyway as
+/// self-documentation of that key's role, and because relying solely on
+/// the recursive fallthrough to reach its nested `filters:` would be easy
+/// to break silently by, say, changing the recursion structure. Verified
+/// by an out-of-band recursive scan of the whole corpus (every mapping
+/// key anywhere whose value is a list containing at least one `{name: …}`
+/// entry): the only three such keys across all 544 files are `filters`
+/// (1788 occurrences), `settings` (512), and `keywordsfilters` (174).
+/// `settings` entries are definition-level config/login/UI fields (e.g.
+/// `username`, `sort`, `stripcyrillic`), not filter invocations — spot
+/// checked directly in the YAML — and are correctly excluded here.
+///
+/// Other `name:` fields in a definition (settings, login inputs, category
+/// names, …) are not filter invocations and must not be collected.
 fn collect_filter_names(node: &serde_yaml_ng::Value, out: &mut Vec<String>) {
     match node {
         serde_yaml_ng::Value::Mapping(map) => {
             for (k, v) in map {
-                if matches!(k.as_str(), Some("filters" | "dateheaders"))
-                    && let Some(seq) = v.as_sequence()
+                if matches!(
+                    k.as_str(),
+                    Some("filters" | "dateheaders" | "keywordsfilters")
+                ) && let Some(seq) = v.as_sequence()
                 {
                     for item in seq {
                         if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
@@ -467,8 +487,9 @@ fn collect_filter_names(node: &serde_yaml_ng::Value, out: &mut Vec<String>) {
     }
 }
 
-/// Asserts every filter name the corpus actually invokes (under `filters:`
-/// or `dateheaders:`) is implemented by [`oxidarr_cardigann::filters`].
+/// Asserts every filter name the corpus actually invokes (under
+/// `filters:`, `dateheaders:`'s nested `filters:`, or `keywordsfilters:`)
+/// is implemented by [`oxidarr_cardigann::filters`].
 ///
 /// A filter is only reported missing when `parse_filter` returns
 /// [`oxidarr_cardigann::CardigannError::UnknownFilter`] specifically. Calling
