@@ -71,6 +71,11 @@ pub struct CategoryMapping {
     pub cat: String,
     #[serde(default)]
     pub desc: String,
+    /// Marks the tracker's default category, used when a search specifies
+    /// no category at all (660 of 19,014 category-mapping entries across
+    /// 26 files, e.g. 1ptbar.yml).
+    #[serde(default)]
+    pub default: bool,
 }
 
 /// A user-configurable setting rendered in the UI.
@@ -141,6 +146,11 @@ pub struct SearchPath {
 pub struct Response {
     #[serde(rename = "type")]
     pub kind: String,
+    /// Text to show when this path's response indicates no results (e.g.
+    /// reelflix-api.yml's `"No Torrents Found"`), distinct from a genuine
+    /// error.
+    #[serde(default, rename = "noResultsMessage")]
+    pub no_results_message: Option<String>,
 }
 
 /// How to locate result rows in a response.
@@ -654,5 +664,56 @@ search:
             .unwrap();
         assert_eq!(case.0.len(), 2);
         assert_eq!(case.0[1].0, "*");
+    }
+
+    #[test]
+    fn category_mapping_default_flag_is_captured() {
+        // 1ptbar.yml: `{id: 401, cat: Movies, desc: "Movie", default: true}`
+        // marks the tracker's default category; without this field it was
+        // silently dropped on 660 of 19,014 category-mapping entries.
+        let yaml = r#"
+id: example
+name: Example
+caps:
+  categorymappings:
+    - {id: "401", cat: Movies, desc: "Movie", default: true}
+    - {id: "402", cat: TV, desc: "TV"}
+search:
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+        let def = parse_definition(yaml).unwrap();
+        assert!(def.caps.categorymappings[0].default);
+        assert!(!def.caps.categorymappings[1].default);
+    }
+
+    #[test]
+    fn path_response_no_results_message_is_captured() {
+        // reelflix-api.yml carries a real, non-empty noResultsMessage.
+        let yaml = r#"
+id: example
+name: Example
+search:
+  paths:
+    - path: api/search
+      response:
+        type: json
+        noResultsMessage: "No Torrents Found"
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+        let def = parse_definition(yaml).unwrap();
+        let response = def.search.paths[0].response.as_ref().unwrap();
+        assert_eq!(response.kind, "json");
+        assert_eq!(
+            response.no_results_message.as_deref(),
+            Some("No Torrents Found")
+        );
     }
 }
