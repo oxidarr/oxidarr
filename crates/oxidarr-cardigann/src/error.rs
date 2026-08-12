@@ -11,4 +11,8 @@ pub enum CardigannError {
     /// A `:contains(...)` clause was opened but never closed.
     #[error("selector {selector:?} has an unbalanced :contains(...) clause")]
     UnbalancedContains { selector: String },
+
+    /// A template could not be parsed.
+    #[error("template {template:?}: {reason}")]
+    Template { template: String, reason: String },
 }

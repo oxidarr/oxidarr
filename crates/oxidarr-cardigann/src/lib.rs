@@ -5,5 +5,6 @@
 
 pub mod error;
 pub mod selector;
+pub mod template;
 
 pub use error::CardigannError;
