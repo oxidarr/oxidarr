@@ -522,3 +522,34 @@ fn every_filter_used_by_the_corpus_is_implemented() {
     }
     assert!(missing.is_empty(), "unimplemented filters: {missing:?}");
 }
+
+#[test]
+fn every_definition_matches_the_v11_model() {
+    let mut failures = Vec::new();
+    for path in definition_paths() {
+        let raw = std::fs::read_to_string(&path).unwrap();
+        // The schema file in the corpus is not itself a definition; detect
+        // it by the parsed document actually having a top-level `$schema`
+        // key, not by the substring appearing anywhere in the file's text
+        // (which could match a definition that merely mentions it).
+        if let Ok(doc) = load_definition(&path)
+            && doc.get("$schema").is_some()
+        {
+            continue;
+        }
+        if let Err(e) = oxidarr_cardigann::model::parse_definition(&raw) {
+            failures.push(format!("{}: {e}", path.display()));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} definitions failed to deserialize:\n{}",
+        failures.len(),
+        failures
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}

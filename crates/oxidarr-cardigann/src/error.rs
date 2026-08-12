@@ -23,4 +23,8 @@ pub enum CardigannError {
     /// A filter was called with arguments it cannot use.
     #[error("filter {name:?}: {reason}")]
     Filter { name: String, reason: String },
+
+    /// A definition did not match the v11 schema.
+    #[error("definition does not match schema v11: {reason}")]
+    Definition { reason: String },
 }

@@ -5,6 +5,7 @@
 
 pub mod error;
 pub mod filters;
+pub mod model;
 pub mod selector;
 pub mod template;
 
