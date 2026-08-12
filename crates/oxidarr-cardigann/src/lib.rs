@@ -4,6 +4,7 @@
 //! The network client is injected, so the engine is testable against fixtures.
 
 pub mod error;
+pub mod filters;
 pub mod selector;
 pub mod template;
 

@@ -15,4 +15,12 @@ pub enum CardigannError {
     /// A template could not be parsed.
     #[error("template {template:?}: {reason}")]
     Template { template: String, reason: String },
+
+    /// A definition referenced a filter this engine does not implement.
+    #[error("unknown filter {name:?}")]
+    UnknownFilter { name: String },
+
+    /// A filter was called with arguments it cannot use.
+    #[error("filter {name:?}: {reason}")]
+    Filter { name: String, reason: String },
 }

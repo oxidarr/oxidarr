@@ -436,3 +436,68 @@ mod template_span_tests {
         assert_eq!(residuals, vec!["tr"]);
     }
 }
+
+/// Recursively collects the `name` of every entry under a `filters:` or
+/// `dateheaders:` sequence in a definition — the two places Cardigann
+/// definitions invoke filter functions. Other `name:` fields in a
+/// definition (settings, login inputs, category names, …) are not filter
+/// invocations and must not be collected.
+fn collect_filter_names(node: &serde_yaml_ng::Value, out: &mut Vec<String>) {
+    match node {
+        serde_yaml_ng::Value::Mapping(map) => {
+            for (k, v) in map {
+                if matches!(k.as_str(), Some("filters" | "dateheaders"))
+                    && let Some(seq) = v.as_sequence()
+                {
+                    for item in seq {
+                        if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
+                            out.push(name.to_string());
+                        }
+                    }
+                }
+                collect_filter_names(v, out);
+            }
+        }
+        serde_yaml_ng::Value::Sequence(seq) => {
+            for v in seq {
+                collect_filter_names(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Asserts every filter name the corpus actually invokes (under `filters:`
+/// or `dateheaders:`) is implemented by [`oxidarr_cardigann::filters`].
+///
+/// A filter is only reported missing when `parse_filter` returns
+/// [`oxidarr_cardigann::CardigannError::UnknownFilter`] specifically. Calling
+/// `parse_filter` with empty arguments (there is no other way to probe "is
+/// this name known" without a real argument list from the call site) means
+/// a filter that legitimately rejects empty arguments for reasons unrelated
+/// to its name — a bad regex pattern, say — would also return an `Err`; if
+/// this test treated any `Err` as "missing", that argument error would be
+/// misreported as an unimplemented filter. Matching on the specific
+/// `UnknownFilter` variant keeps those two failure modes distinct: only "no
+/// such filter name" gates the corpus, never "this filter exists but got
+/// arguments it can't use".
+#[test]
+fn every_filter_used_by_the_corpus_is_implemented() {
+    let mut missing = std::collections::BTreeSet::new();
+    for path in definition_paths() {
+        let doc = load_definition(&path).unwrap();
+        let mut names = Vec::new();
+        collect_filter_names(&doc, &mut names);
+        for name in names {
+            if name.is_empty() {
+                continue;
+            }
+            if let Err(oxidarr_cardigann::CardigannError::UnknownFilter { .. }) =
+                oxidarr_cardigann::filters::parse_filter(&name, &[])
+            {
+                missing.insert(name);
+            }
+        }
+    }
+    assert!(missing.is_empty(), "unimplemented filters: {missing:?}");
+}
