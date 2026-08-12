@@ -424,39 +424,100 @@ fn css_unescape(s: &str) -> String {
     out
 }
 
+/// Returns the byte index of the first unquoted occurrence of `needle` in
+/// `s`. Text inside a quoted string (single or double, with backslash
+/// escapes, matching CSS string-literal syntax) is treated as opaque, so a
+/// `!=`, `[`, or `]` that happens to appear inside e.g. a
+/// `:contains("...")` argument is never mistaken for real selector syntax
+/// belonging to an attribute selector that comes after it.
+fn find_unquoted(s: &str, needle: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    let mut chars = s.char_indices();
+    while let Some((i, c)) = chars.next() {
+        // A backslash escapes the next character unconditionally — both
+        // while inside a quoted string (where it's a genuine escaped
+        // quote that must not end the string) and outside one (where a
+        // couple of definitions write a spurious `\"`/`\'` as if a quote
+        // needed the same escaping in every context; that pair must not
+        // be mistaken for the start of a real quoted string either, or
+        // the *next* real quote is misread as the opener and the string
+        // never closes).
+        if c == '\\' {
+            chars.next();
+            continue;
+        }
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        if c == '"' || c == '\'' {
+            quote = Some(c);
+            continue;
+        }
+        if s[i..].starts_with(needle) {
+            return Some(i);
+        }
+    }
+    None
+}
+
 /// Rewrites the jQuery/Sizzle-only `!=` attribute operator (no such
 /// operator exists in standard CSS) into the equivalent standard form:
 /// `[attr!=value]` becomes `:not([attr=value])`.
+///
+/// Scans for `[...]` bodies one at a time — using [`find_unquoted`] for
+/// both the brackets and the `!=` inside them — rather than searching for
+/// `!=` globally and then guessing which brackets it belongs to. A global
+/// search would mis-scope a `!=` that happens to appear inside a quoted
+/// `:contains("...")` argument, attributing it to an unrelated `[...]`
+/// elsewhere in the selector.
 fn rewrite_not_equal(s: &str) -> String {
-    let mut output = String::with_capacity(s.len());
+    let mut out = String::with_capacity(s.len());
     let mut rest = s;
-    while let Some(bang_idx) = rest.find("!=") {
-        let open = rest[..bang_idx].rfind('[');
-        let close = rest[bang_idx..].find(']').map(|i| bang_idx + i);
-        let Some((open, close)) = open.zip(close) else {
-            break;
+    loop {
+        let Some(open) = find_unquoted(rest, "[") else {
+            out.push_str(rest);
+            return out;
         };
-        output.push_str(&rest[..open]);
-        output.push_str(":not([");
-        output.push_str(&rest[open + 1..bang_idx]);
-        output.push('=');
-        output.push_str(&rest[bang_idx + 2..close]);
-        output.push_str("])");
-        rest = &rest[close + 1..];
+        out.push_str(&rest[..open]);
+        let after_open = &rest[open + 1..];
+        let Some(close) = find_unquoted(after_open, "]") else {
+            out.push('[');
+            out.push_str(after_open);
+            return out;
+        };
+        let body = &after_open[..close];
+        if let Some(bang) = find_unquoted(body, "!=") {
+            out.push_str(":not([");
+            out.push_str(&body[..bang]);
+            out.push('=');
+            out.push_str(&body[bang + 2..]);
+            out.push_str("])");
+        } else {
+            out.push('[');
+            out.push_str(body);
+            out.push(']');
+        }
+        rest = &after_open[close + 1..];
     }
-    output.push_str(rest);
-    output
 }
 
 /// Normalizes every `[...]` attribute-selector body in `s` (see
-/// [`normalize_attribute_value`]).
+/// [`normalize_attribute_value`]), scoped the same quote-aware way as
+/// [`rewrite_not_equal`].
 fn normalize_attribute_selectors(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
-    while let Some(open) = rest.find('[') {
+    loop {
+        let Some(open) = find_unquoted(rest, "[") else {
+            out.push_str(rest);
+            return out;
+        };
         out.push_str(&rest[..=open]);
         rest = &rest[open + 1..];
-        let Some(close) = rest.find(']') else {
+        let Some(close) = find_unquoted(rest, "]") else {
             out.push_str(rest);
             return out;
         };
@@ -464,8 +525,6 @@ fn normalize_attribute_selectors(s: &str) -> String {
         out.push(']');
         rest = &rest[close + 1..];
     }
-    out.push_str(rest);
-    out
 }
 
 /// Normalizes a single `attr`, `attr=value`, `attr^=value`, ...
@@ -650,5 +709,80 @@ mod tests {
         let matched = compile("td:contains()").unwrap().select(root);
         assert_eq!(matched.len(), 2);
         assert!(matched.iter().all(|el| el.value().name() == "td"));
+    }
+
+    #[test]
+    fn rewrite_not_equal_turns_bang_equals_into_not() {
+        assert_eq!(
+            rewrite_not_equal(r#"table[id!="torrent_ajanlo"] > tbody > tr[id]"#),
+            r#"table:not([id="torrent_ajanlo"]) > tbody > tr[id]"#
+        );
+    }
+
+    #[test]
+    fn rewrite_not_equal_ignores_bang_equals_inside_quotes() {
+        // A `!=` that happens to appear inside a quoted string (here, a
+        // `:contains()` argument) must not be mistaken for the jQuery `!=`
+        // attribute operator, and must not get attributed to an unrelated
+        // `[...]` that comes later in the same selector.
+        assert_eq!(
+            rewrite_not_equal(r#"div:contains("x!=y")[title!="z"]"#),
+            r#"div:contains("x!=y"):not([title="z"])"#
+        );
+    }
+
+    #[test]
+    fn bang_equals_inside_contains_does_not_corrupt_a_later_attribute() {
+        // End-to-end regression test for the trap case above: compiling
+        // and actually selecting against real HTML, not just checking
+        // that the string parses.
+        let html = r#"
+            <div id="x1" title="z">has x!=y in its text</div>
+            <div id="x2" title="w">has x!=y in its text</div>
+        "#;
+        let doc = Html::parse_document(html);
+        let root = doc.root_element();
+        let matched = compile(r#"div:contains("x!=y")[title!="z"]"#)
+            .unwrap()
+            .select(root);
+        let ids: Vec<&str> = matched
+            .iter()
+            .map(|el| el.value().attr("id").unwrap_or_default())
+            .collect();
+        assert_eq!(ids, vec!["x2"]);
+    }
+
+    #[test]
+    fn normalize_attribute_value_quotes_bare_numeric_value() {
+        assert_eq!(normalize_attribute_value("border=1"), r#"border="1""#);
+        // A value that isn't purely numeric, or is already quoted, is left
+        // alone.
+        assert_eq!(normalize_attribute_value("href^=index"), "href^=index");
+        assert_eq!(normalize_attribute_value(r#"border="1""#), r#"border="1""#);
+    }
+
+    #[test]
+    fn normalize_attribute_value_flattens_escaped_quote_only_value() {
+        assert_eq!(
+            normalize_attribute_value(r#"src$=\"/x.gif\""#),
+            r#"src$="/x.gif""#
+        );
+    }
+
+    #[test]
+    fn css_unescape_decodes_hex_escape() {
+        // `\00a0` is the CSS escape for U+00A0 NO-BREAK SPACE.
+        assert_eq!(css_unescape(r"\00a0GB"), "\u{a0}GB");
+        // A trailing whitespace character after the hex digits is part of
+        // the escape sequence itself and is consumed, not kept literally.
+        assert_eq!(css_unescape(r"\41 BC"), "ABC");
+        // A backslash followed by a non-hex character is a literal escape,
+        // not a hex decode.
+        assert_eq!(css_unescape(r#"\"quoted\""#), r#""quoted""#);
+    }
+
+    #[test]
+    fn unquote_applies_css_unescape_to_a_quoted_argument() {
+        assert_eq!(unquote(r#""\00a0GB""#), "\u{a0}GB");
     }
 }
