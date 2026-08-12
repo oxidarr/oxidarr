@@ -289,13 +289,20 @@ fn collect_template_strings(node: &serde_yaml_ng::Value, out: &mut Vec<String>) 
 /// the evidence behind the template engine's "renders essentially the
 /// whole corpus" claim in the task report, and it will catch a regression
 /// the same way `every_selector_parses_as_standard_css` catches selector
-/// regressions. `1337x.yml`'s TV path is exempted — it is a genuine
-/// upstream typo (a stray extra `)` in `(eq .Config.disablesort .False))`)
+/// regressions.
+///
+/// The TV search path in `1337x.yml` has an unbalanced parenthesis:
+/// `(eq .Config.disablesort .False))`. It is a genuine upstream defect —
 /// that would fail to parse in Cardigann's own engine too, not a gap in
-/// this one.
+/// this one — so that one string is exempted by its defect signature
+/// rather than by file, keeping the file's other ten template strings
+/// (and any future addition to it) fully gated.
 #[test]
 fn every_corpus_template_string_renders() {
     use oxidarr_cardigann::template::{Scope, render};
+
+    const KNOWN_UPSTREAM_DEFECTS: &[(&str, &str)] =
+        &[("1337x.yml", "(eq .Config.disablesort .False))")];
 
     let mut scope = Scope::new();
     scope.set_keywords("big buck bunny");
@@ -305,14 +312,9 @@ fn every_corpus_template_string_renders() {
     scope.set_result("title_optional", "Sintel");
     scope.set_categories(["2000", "2010"]);
 
-    let known_upstream_defects = ["1337x.yml"];
-
     let mut total = 0usize;
     let mut failed = Vec::new();
     for path in definition_paths() {
-        let is_known_defect = known_upstream_defects
-            .iter()
-            .any(|name| path.file_name().is_some_and(|f| f == *name));
         let Ok(doc) = load_definition(&path) else {
             continue;
         };
@@ -320,6 +322,9 @@ fn every_corpus_template_string_renders() {
         collect_template_strings(&doc, &mut strings);
         for s in strings {
             total += 1;
+            let is_known_defect = KNOWN_UPSTREAM_DEFECTS.iter().any(|(file, signature)| {
+                path.file_name().is_some_and(|f| f == *file) && s.contains(signature)
+            });
             if render(&s, &scope).is_err() && !is_known_defect {
                 failed.push(format!("{}: {s}", path.display()));
             }
