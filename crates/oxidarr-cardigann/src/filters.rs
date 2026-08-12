@@ -260,18 +260,45 @@ fn validate_intersect(input: &str, whitelist: &str) -> String {
     kept.join(", ")
 }
 
+/// Percent-encodes `input` to match .NET's `WebUtility.UrlEncode` — the
+/// primitive Prowlarr's own Cardigann `urlencode` filter calls into
+/// (`CardigannBase.cs`'s `data.UrlEncode(_encoding)`, whose
+/// `StringExtensions.UrlEncode` calls `WebUtility.UrlEncodeToBytes`).
+///
+/// This deliberately does **not** follow RFC 3986 (the convention
+/// `Uri.EscapeDataString` uses, and what an "obvious" fix might reach
+/// for). `dotnet/runtime`'s `WebUtility.cs` defines its safe set as "Url
+/// safe chars as defined by RFC 1738.4, minus `+`" — literally
+/// `A-Za-z0-9-_.!*()` — and separately encodes a space as `+` (RFC
+/// 1738.4, not RFC 3986, is also where `~` and `!*()` being treated
+/// differently from RFC 3986's unreserved set comes from: RFC 3986 would
+/// leave `~` unescaped and escape `!*()`; .NET does the exact opposite).
+/// Do not "fix" this back to RFC 3986's unreserved set — that would flip
+/// the space encoding, `~`, and `!*()` all at once, and break the search
+/// URLs real trackers expect, since this is the encoding those requests
+/// are built against.
 fn urlencoding_encode(input: &str) -> String {
     use std::fmt::Write as _;
 
     let mut out = String::with_capacity(input.len());
     for b in input.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'!'
+            | b'*'
+            | b'('
+            | b')' => {
                 out.push(char::from(b));
             }
+            b' ' => out.push('+'),
             _ => {
-                // `out` has just enough capacity reserved above; the write
-                // cannot fail.
+                // `out` has just enough capacity reserved above for the
+                // common case; the write itself cannot fail.
                 let _ = write!(out, "%{b:02X}");
             }
         }
@@ -279,6 +306,11 @@ fn urlencoding_encode(input: &str) -> String {
     out
 }
 
+/// Decodes percent-encoding and `+`-as-space, mirroring
+/// [`urlencoding_encode`]'s .NET-matching behavior. Accepts either case
+/// in a `%XX` hex pair (`WebUtility.UrlDecode` does too); a malformed or
+/// truncated `%` sequence (not followed by two hex digits) is left
+/// literal rather than dropped or erroring.
 fn urlencoding_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -292,7 +324,7 @@ fn urlencoding_decode(input: &str) -> String {
                 continue;
             }
         }
-        out.push(bytes[i]);
+        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
@@ -501,8 +533,44 @@ mod tests {
 
     #[test]
     fn urlencode_and_urldecode_roundtrip() {
-        assert_eq!(run("urlencode", &[], "a b"), "a%20b");
-        assert_eq!(run("urldecode", &[], "a%20b"), "a b");
+        // Matches .NET's `WebUtility.UrlEncode`, which is what Prowlarr's
+        // own `urlencode` filter calls into: a space becomes `+`, not
+        // `%20` (RFC 3986's `Uri.EscapeDataString` convention).
+        assert_eq!(run("urlencode", &[], "a b"), "a+b");
+        assert_eq!(run("urldecode", &[], "a+b"), "a b");
+    }
+
+    #[test]
+    fn urlencode_percent_encodes_tilde() {
+        // RFC 3986 would leave `~` unescaped; .NET's safe set does not
+        // include it, so it must come out as %7E.
+        assert_eq!(run("urlencode", &[], "~"), "%7E");
+    }
+
+    #[test]
+    fn urlencode_leaves_bang_star_and_parens_unescaped() {
+        // RFC 3986 would escape these; .NET's RFC-1738.4-minus-plus safe
+        // set does not.
+        assert_eq!(run("urlencode", &[], "!*()"), "!*()");
+    }
+
+    #[test]
+    fn urlencode_encodes_multi_byte_characters_as_utf8_percent_pairs() {
+        // 'é' is U+00E9, UTF-8 bytes 0xC3 0xA9.
+        assert_eq!(run("urlencode", &[], "é"), "%C3%A9");
+    }
+
+    #[test]
+    fn urlencode_escapes_a_literal_plus_so_it_cannot_be_mistaken_for_a_space() {
+        // `+` is not in the safe set, so an actual `+` in the input must
+        // itself be percent-encoded — otherwise it would be
+        // indistinguishable from an encoded space on the way back.
+        assert_eq!(run("urlencode", &[], "+"), "%2B");
+    }
+
+    #[test]
+    fn urldecode_treats_a_literal_plus_as_a_space() {
+        assert_eq!(run("urldecode", &[], "a+b"), "a b");
     }
 
     #[test]
