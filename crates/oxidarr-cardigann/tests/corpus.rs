@@ -115,7 +115,7 @@ fn every_selector_parses_as_standard_css() {
                 }
                 continue;
             }
-            if scraper::Selector::parse(&sel).is_err() {
+            if oxidarr_cardigann::selector::compile(&sel).is_err() {
                 failed.push(sel);
             }
         }
