@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 pub struct Release {
     /// Release name as published by the tracker.
     pub title: String,
-    /// Size in bytes. Zero when the tracker does not report one.
-    pub size: u64,
+    /// Size in bytes. None when the tracker does not report one.
+    pub size: Option<u64>,
     pub seeders: Option<u32>,
     pub leechers: Option<u32>,
     pub grabs: Option<u32>,
@@ -31,13 +31,25 @@ pub struct Release {
     pub imdb_id: Option<String>,
     pub tmdb_id: Option<u32>,
     pub tvdb_id: Option<u32>,
+    /// Release description or body text.
+    pub description: Option<String>,
+    /// URL or data URI of a poster/cover image.
+    pub poster: Option<String>,
+    /// Genre classification, tracker-specific format.
+    pub genre: Option<String>,
+    /// Number of files in the release.
+    pub files: Option<u32>,
+    /// Minimum seeding time in seconds required by the tracker.
+    pub minimum_seed_time: Option<u64>,
+    /// Minimum upload ratio required by the tracker.
+    pub minimum_ratio: Option<f32>,
 }
 
 impl Default for Release {
     fn default() -> Self {
         Self {
             title: String::new(),
-            size: 0,
+            size: None,
             seeders: None,
             leechers: None,
             grabs: None,
@@ -52,6 +64,12 @@ impl Default for Release {
             imdb_id: None,
             tmdb_id: None,
             tvdb_id: None,
+            description: None,
+            poster: None,
+            genre: None,
+            files: None,
+            minimum_seed_time: None,
+            minimum_ratio: None,
         }
     }
 }

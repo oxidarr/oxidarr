@@ -26,6 +26,18 @@ macro_rules! id_newtype {
 
 id_newtype!(
     /// Identifies an indexer within this Oxidarr instance.
+    ///
+    /// # Type Safety
+    ///
+    /// This is a distinct type to prevent accidental swaps with `AppId` or `RemoteIndexerId`.
+    /// The type system enforces this at compile time:
+    ///
+    /// ```compile_fail
+    /// # use oxidarr_core::ids::{IndexerId, AppId};
+    /// fn take_app_id(id: AppId) {}
+    /// let indexer_id = IndexerId(1);
+    /// take_app_id(indexer_id); // compile error: cannot pass IndexerId as AppId
+    /// ```
     IndexerId
 );
 id_newtype!(
