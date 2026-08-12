@@ -57,12 +57,18 @@ impl Scope {
     fn lookup(&self, path: &str) -> String {
         match path {
             ".Keywords" => self.keywords.clone(),
-            // Prowlarr is a .NET application; `bool.ToString()` there
-            // yields "True"/"False" (capitalised), which is exactly what
-            // the corpus's `case: { True: ..., False: ... }` blocks match
-            // against raw JSON boolean text. See the task report for the
-            // corpus evidence that ruled out an empty-string reading.
-            ".False" => "False".to_string(),
+            // Falsy by construction: 74 corpus files map a raw boolean
+            // through `case: { False: "{{ .False }}", True: "{{ .True }}" }`
+            // and then feed the result straight into a bare truthy check,
+            // e.g. `{{ if .Result._internal }}Internal{{ else }}{{ end }}`
+            // (blutopia-api.yml, nobs.yml, luminarr-api.yml, +71 more). For
+            // that idiom to do anything at all, `.False` must render falsy
+            // (empty) and `.True` must render truthy (non-empty) — Go
+            // template truthiness treats the empty string as the only
+            // falsy string, so `.False` cannot be a non-empty literal
+            // without making every one of those checks unconditionally
+            // true. See the task report for the corpus evidence.
+            ".False" => String::new(),
             ".True" => "True".to_string(),
             p => {
                 if let Some(name) = p.strip_prefix(".Config.") {
@@ -841,11 +847,12 @@ mod tests {
     #[test]
     fn parenthesised_and_of_nested_eq_and_ne() {
         // e.g. the corpus's `and (.Result._releaseGroup) (ne ... "NULL")`
-        // and `and (.Keywords) (eq .Config.disablesort .False)` idioms:
-        // `and`/`or` arguments are themselves full expressions when
-        // parenthesised, not just bare variable paths.
+        // and 1337x.yml's `and (.Keywords) (eq .Config.disablesort .False)`
+        // idioms: `and`/`or` arguments are themselves full expressions when
+        // parenthesised, not just bare variable paths. An unset checkbox
+        // config value is the empty string, i.e. equal to `.False`.
         let mut s = scope();
-        s.set_config("disablesort", "False");
+        s.set_config("disablesort", "");
         assert_eq!(
             render(
                 "{{ if and (.Keywords) (eq .Config.disablesort .False) }}y{{ else }}n{{ end }}",
@@ -854,7 +861,7 @@ mod tests {
             .unwrap(),
             "y"
         );
-        s.set_config("disablesort", "True");
+        s.set_config("disablesort", "true");
         assert_eq!(
             render(
                 "{{ if and (.Keywords) (eq .Config.disablesort .False) }}y{{ else }}n{{ end }}",
@@ -921,12 +928,37 @@ mod tests {
     }
 
     #[test]
-    fn false_and_true_render_as_capitalised_literals() {
-        // .NET's `bool.ToString()` — matches the corpus's
-        // `case: { True: "{{ .True }}", False: "{{ .False }}" }` blocks,
-        // which only make sense if these round-trip the raw text.
-        assert_eq!(render("{{ .False }}", &scope()).unwrap(), "False");
+    fn false_is_empty_and_true_is_non_empty() {
+        assert_eq!(render("{{ .False }}", &scope()).unwrap(), "");
         assert_eq!(render("{{ .True }}", &scope()).unwrap(), "True");
+    }
+
+    #[test]
+    fn false_and_true_round_trip_through_the_corpus_case_idiom() {
+        // The real shape (e.g. blutopia-api.yml:143-149, nobs.yml:135-141):
+        // a `case:` block resolves a raw boolean field to `{{ .False }}` or
+        // `{{ .True }}`, and the resolved value is stored back into a
+        // `.Result.*` field, which a *later*, separate template then
+        // checks with a bare `{{ if ... }}`. Only rendering `.False` in
+        // isolation (as the previous test does) cannot catch a regression
+        // where `.False` is non-empty: that would make the `if` below
+        // always take the truthy branch regardless of which case matched.
+        // This test replicates both halves of that pipeline end to end.
+        let false_case_value = render("{{ .False }}", &scope()).unwrap();
+        let mut s = scope();
+        s.set_result("_internal", &false_case_value);
+        assert_eq!(
+            render("{{ if .Result._internal }}Internal{{ else }}{{ end }}", &s).unwrap(),
+            ""
+        );
+
+        let true_case_value = render("{{ .True }}", &scope()).unwrap();
+        let mut s = scope();
+        s.set_result("_internal", &true_case_value);
+        assert_eq!(
+            render("{{ if .Result._internal }}Internal{{ else }}{{ end }}", &s).unwrap(),
+            "Internal"
+        );
     }
 
     #[test]
