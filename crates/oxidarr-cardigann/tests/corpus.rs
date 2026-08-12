@@ -39,6 +39,14 @@ pub fn definition_paths() -> Vec<PathBuf> {
     paths
 }
 
+/// Loads and parses a YAML definition file, handling UTF-8 BOM if present.
+fn load_definition(path: &Path) -> Result<serde_yaml_ng::Value, Box<dyn std::error::Error>> {
+    let raw = std::fs::read_to_string(path)?;
+    // Strip BOM if present (some files have UTF-8 BOM)
+    let content = raw.trim_start_matches('\u{FEFF}');
+    Ok(serde_yaml_ng::from_str(content)?)
+}
+
 #[test]
 fn corpus_is_present_and_large() {
     let paths = definition_paths();
@@ -53,10 +61,7 @@ fn corpus_is_present_and_large() {
 fn every_definition_is_valid_yaml() {
     let mut failures = Vec::new();
     for path in definition_paths() {
-        let raw = std::fs::read_to_string(&path).unwrap();
-        // Strip BOM if present (some files have UTF-8 BOM)
-        let content = raw.trim_start_matches('\u{FEFF}');
-        if let Err(e) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(content) {
+        if let Err(e) = load_definition(&path) {
             failures.push(format!("{}: {e}", path.display()));
         }
     }
@@ -72,7 +77,9 @@ fn collect_selectors(node: &serde_yaml_ng::Value, out: &mut Vec<String>) {
     match node {
         serde_yaml_ng::Value::Mapping(map) => {
             for (k, v) in map {
-                if k.as_str() == Some("selector") && let Some(s) = v.as_str() {
+                if k.as_str() == Some("selector")
+                    && let Some(s) = v.as_str()
+                {
                     out.push(s.to_string());
                 }
                 collect_selectors(v, out);
@@ -93,17 +100,19 @@ fn every_selector_parses_as_standard_css() {
     let mut failed = Vec::new();
 
     for path in definition_paths() {
-        let raw = std::fs::read_to_string(&path).unwrap();
-        // Strip BOM if present (some files have UTF-8 BOM)
-        let content = raw.trim_start_matches('\u{FEFF}');
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(content).unwrap();
+        let doc = load_definition(&path).unwrap();
         let mut selectors = Vec::new();
         collect_selectors(&doc, &mut selectors);
 
         for sel in selectors {
             total += 1;
-            // Templated selectors are resolved at runtime, not parse time.
+            // Templated selectors cannot be parsed until they are rendered.
+            // A literal `:contains(` in one is still broken once it is, so
+            // count those rather than letting them escape the gate.
             if sel.contains("{{") {
+                if sel.contains(":contains(") {
+                    failed.push(sel);
+                }
                 continue;
             }
             if scraper::Selector::parse(&sel).is_err() {
