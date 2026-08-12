@@ -30,6 +30,21 @@ pub struct Definition {
     pub login: Option<Login>,
     #[serde(default, rename = "requestDelay")]
     pub request_delay: Option<f64>,
+    /// How to resolve a download link (e.g. a magnet/infohash) from a
+    /// result, for indexers where that needs its own request/extraction
+    /// pipeline separate from the search row itself.
+    #[serde(default)]
+    pub download: Option<Download>,
+    /// Ids of older definitions this one supersedes.
+    #[serde(default)]
+    pub replaces: Vec<String>,
+    /// Pinned TLS certificate fingerprints for this indexer's host.
+    #[serde(default)]
+    pub certificates: Vec<String>,
+    #[serde(default)]
+    pub followredirect: bool,
+    #[serde(default, rename = "testlinktorrent")]
+    pub test_link_torrent: bool,
 }
 
 /// Declared search capabilities and category mappings.
@@ -39,6 +54,14 @@ pub struct Caps {
     pub categorymappings: Vec<CategoryMapping>,
     #[serde(default)]
     pub modes: BTreeMap<String, Vec<String>>,
+    /// Extra tracker-defined categories declared by id/label, distinct from
+    /// `categorymappings` (which maps onto Newznab categories).
+    #[serde(default)]
+    pub categories: BTreeMap<String, String>,
+    #[serde(default)]
+    pub allowrawsearch: bool,
+    #[serde(default)]
+    pub allowtvsearchimdb: bool,
 }
 
 /// Maps a tracker's own category id onto a Newznab category.
@@ -58,8 +81,15 @@ pub struct Setting {
     pub kind: String,
     #[serde(default)]
     pub label: String,
+    // The corpus's `default:` values are exclusively strings, bools, and
+    // integers (never a nested list/mapping), and `serde_yaml_ng` coerces
+    // any of those scalar shapes into a plain `String` field directly
+    // (proven: `default: true`/`default: 5`/`default: seeders` all
+    // deserialize into `Some("true")`/`Some("5")`/`Some("seeders")`), so a
+    // plain `String` captures every value losslessly without needing a
+    // `serde_yaml_ng::Value` or a bespoke enum.
     #[serde(default)]
-    pub default: Option<serde_yaml_ng::Value>,
+    pub default: Option<String>,
     #[serde(default)]
     pub options: BTreeMap<String, String>,
 }
@@ -69,6 +99,10 @@ pub struct Setting {
 pub struct Search {
     #[serde(default)]
     pub paths: Vec<SearchPath>,
+    /// A single unwrapped path, as shorthand for a one-element `paths`
+    /// list (e.g. Bittorrentfiles.yml, houseofdevil.yml).
+    #[serde(default)]
+    pub path: Option<String>,
     #[serde(default)]
     pub inputs: BTreeMap<String, String>,
     #[serde(default)]
@@ -77,6 +111,11 @@ pub struct Search {
     pub headers: BTreeMap<String, Vec<String>>,
     pub rows: Rows,
     pub fields: BTreeMap<String, Field>,
+    /// Response-level error detection, distinct from row-level filters.
+    #[serde(default)]
+    pub error: Vec<ErrorRule>,
+    #[serde(default, rename = "allowEmptyInputs")]
+    pub allow_empty_inputs: bool,
 }
 
 /// One request path, optionally templated.
@@ -87,6 +126,21 @@ pub struct SearchPath {
     pub method: Option<String>,
     #[serde(default)]
     pub inputs: BTreeMap<String, String>,
+    /// The subset of `Categories` this path is used for, when a definition
+    /// splits search across several paths by category.
+    #[serde(default)]
+    pub categories: Vec<String>,
+    #[serde(default)]
+    pub response: Option<Response>,
+    #[serde(default)]
+    pub followredirect: bool,
+}
+
+/// How to interpret a path's response body.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Response {
+    #[serde(rename = "type")]
+    pub kind: String,
 }
 
 /// How to locate result rows in a response.
@@ -101,6 +155,14 @@ pub struct Rows {
     pub after: Option<usize>,
     #[serde(default)]
     pub count: Option<Count>,
+    /// Extracts a date shared by multiple rows (e.g. a "Torrents added
+    /// <date>" heading) rather than repeated per row.
+    #[serde(default)]
+    pub dateheaders: Option<Field>,
+    #[serde(default)]
+    pub multiple: bool,
+    #[serde(default, rename = "missingAttributeEqualsNoResults")]
+    pub missing_attribute_equals_no_results: bool,
 }
 
 /// A row count, either given directly or read out of the response via a
@@ -125,6 +187,66 @@ pub struct Field {
     pub optional: bool,
     #[serde(default)]
     pub filters: Vec<FilterSpec>,
+    /// The only extraction rule for `downloadvolumefactor`/
+    /// `uploadvolumefactor` in the majority of the corpus (over half of all
+    /// definitions): a first-match-wins list of selector/value pairs, most
+    /// commonly ending in a `'*'` catch-all.
+    #[serde(default)]
+    pub case: Option<Case>,
+    // Same coercion argument as `Setting::default`: the corpus's field-level
+    // `default:` values are only ever strings or bare integers, and
+    // `serde_yaml_ng` deserializes either directly into a plain `String`.
+    #[serde(default)]
+    pub default: Option<String>,
+    /// A CSS selector for elements to strip out of the matched node before
+    /// reading its text (e.g. removing `<a>`/`<img>` clutter from a
+    /// description column).
+    #[serde(default)]
+    pub remove: Option<String>,
+}
+
+/// A `case:` block: an ordered list of (selector, value) pairs, matched in
+/// document order.
+///
+/// Cardigann evaluates these entries top to bottom and stops at the first
+/// match; a `'*'` key is the conventional catch-all and must be tried
+/// *last*. `BTreeMap`/`HashMap` cannot represent this: `'*'` (`0x2A`) sorts
+/// before every letter and digit, so a sorted or hashed map would silently
+/// move the catch-all to the front and make it swallow every case. This
+/// type deserializes through `serde_yaml_ng::Mapping`, which preserves the
+/// document's original key order, and keeps that order in a `Vec`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Case(pub Vec<(String, String)>);
+
+impl<'de> Deserialize<'de> for Case {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mapping = serde_yaml_ng::Mapping::deserialize(deserializer)?;
+        let mut entries = Vec::with_capacity(mapping.len());
+        for (key, value) in mapping {
+            let key = scalar_to_string(&key)
+                .ok_or_else(|| serde::de::Error::custom("case key is not a scalar"))?;
+            let value = scalar_to_string(&value)
+                .ok_or_else(|| serde::de::Error::custom("case value is not a scalar"))?;
+            entries.push((key, value));
+        }
+        Ok(Self(entries))
+    }
+}
+
+/// Renders a scalar YAML value as text, the same coercion `serde_yaml_ng`
+/// applies natively to a plain `String`-typed field — needed here because
+/// [`Case`] deserializes through an intermediate `Mapping` rather than
+/// going straight to `String`.
+fn scalar_to_string(value: &serde_yaml_ng::Value) -> Option<String> {
+    match value {
+        serde_yaml_ng::Value::String(s) => Some(s.clone()),
+        serde_yaml_ng::Value::Bool(b) => Some(b.to_string()),
+        serde_yaml_ng::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
 }
 
 /// A `{name, args}` filter invocation from a definition.
@@ -183,15 +305,40 @@ impl std::fmt::Display for FilterArg {
 pub struct Login {
     #[serde(default)]
     pub path: Option<String>,
-    // Cardigann's `cookie`/`selectorinputs`-style logins (e.g. postman.yml)
-    // omit `method` entirely, relying on `selectorinputs` and `test`
-    // instead of an explicit HTTP method.
+    // Cardigann's `cookie`/`selectorinputs`-style logins (e.g. postman.yml,
+    // the one login block in the corpus with no `method` at all) rely on
+    // `selectorinputs` and `test` instead of an explicit HTTP method.
     #[serde(default)]
     pub method: Option<String>,
     #[serde(default)]
     pub inputs: BTreeMap<String, String>,
     #[serde(default)]
     pub test: Option<LoginTest>,
+    /// How to detect a failed login, present in most login blocks in the
+    /// corpus.
+    #[serde(default)]
+    pub error: Vec<ErrorRule>,
+    /// A CSS selector for the `<form>` element to submit.
+    #[serde(default)]
+    pub form: Option<String>,
+    /// Overrides where the login form's `action` submits to.
+    #[serde(default)]
+    pub submitpath: Option<String>,
+    /// Input values that must be scraped from the login page itself before
+    /// submitting (e.g. a CSRF token), keyed by input name.
+    #[serde(default)]
+    pub selectorinputs: BTreeMap<String, Field>,
+    /// Literal cookies to set before requesting the login page.
+    #[serde(default)]
+    pub cookies: Vec<String>,
+    #[serde(default)]
+    pub captcha: Option<Captcha>,
+    /// When true, `inputs`' keys are CSS selectors for the form fields to
+    /// fill rather than plain input names.
+    #[serde(default)]
+    pub selectors: bool,
+    #[serde(default)]
+    pub headers: BTreeMap<String, Vec<String>>,
 }
 
 /// A request proving the session is authenticated.
@@ -200,6 +347,87 @@ pub struct LoginTest {
     pub path: String,
     #[serde(default)]
     pub selector: Option<String>,
+}
+
+/// A rule for detecting a failed request, shared by `login.error` and
+/// `search.error`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ErrorRule {
+    pub selector: String,
+    /// How to read the human-readable message for this match. Despite the
+    /// name, this is extracted exactly like any other [`Field`] — most
+    /// commonly via a literal `text:`, but `selector:`, `attribute:`,
+    /// `filters:`, and `remove:` all occur too, so this reuses `Field`
+    /// rather than a smaller selector/text-only struct.
+    #[serde(default)]
+    pub message: Option<Field>,
+}
+
+/// An image captcha to solve before submitting the login form.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Captcha {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub selector: String,
+    pub input: String,
+}
+
+/// How to resolve a result's actual download link, for indexers where that
+/// takes its own request/extraction pipeline rather than being read
+/// straight off the search row (13% of the corpus, e.g. `0magnet.yml`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Download {
+    #[serde(default)]
+    pub selectors: Vec<DownloadSelector>,
+    /// A request to make before the download itself, e.g. to submit a
+    /// confirmation form.
+    #[serde(default)]
+    pub before: Option<DownloadBefore>,
+    #[serde(default)]
+    pub infohash: Option<Infohash>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub method: Option<String>,
+}
+
+/// One candidate selector for a result's download link, tried in order.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DownloadSelector {
+    #[serde(default)]
+    pub selector: Option<String>,
+    #[serde(default)]
+    pub attribute: Option<String>,
+    #[serde(default)]
+    pub filters: Vec<FilterSpec>,
+    /// Read this selector against `download.before`'s response instead of
+    /// the result row's page.
+    #[serde(default)]
+    pub usebeforeresponse: bool,
+}
+
+/// A request made prior to resolving the download link.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DownloadBefore {
+    #[serde(default)]
+    pub path: Option<String>,
+    /// An alternative to a literal `path`: reads the request path from the
+    /// result page via a selector.
+    #[serde(default)]
+    pub pathselector: Option<Field>,
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(default)]
+    pub inputs: BTreeMap<String, String>,
+}
+
+/// Extracts a magnet/infohash and its title from a result page.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Infohash {
+    pub hash: Field,
+    pub title: Field,
+    #[serde(default)]
+    pub usebeforeresponse: bool,
 }
 
 /// Parses a definition from YAML.
@@ -282,5 +510,149 @@ search:
     #[test]
     fn malformed_yaml_is_an_error() {
         assert!(parse_definition("id: [unclosed").is_err());
+    }
+
+    #[test]
+    fn rows_count_accepts_a_selector_object() {
+        let yaml = r"
+id: example
+name: Example
+search:
+  rows:
+    selector: item
+    count:
+      selector: response.total
+  fields:
+    title:
+      selector: a
+";
+        let def = parse_definition(yaml).unwrap();
+        let Some(Count::Selector { selector }) = def.search.rows.count else {
+            unreachable!("expected Count::Selector, got {:?}", def.search.rows.count);
+        };
+        assert_eq!(selector, "response.total");
+    }
+
+    #[test]
+    fn rows_count_accepts_a_literal_integer() {
+        let yaml = r"
+id: example
+name: Example
+search:
+  rows:
+    selector: item
+    count: 25
+  fields:
+    title:
+      selector: a
+";
+        let def = parse_definition(yaml).unwrap();
+        assert!(matches!(def.search.rows.count, Some(Count::Literal(25))));
+    }
+
+    #[test]
+    fn filter_args_accepts_a_negative_index_and_round_trips_through_to_vec() {
+        // The `split` filter's second argument is a bare (possibly
+        // negative) integer, e.g. `args: [",", -1]` in nyaasi.yml.
+        let spec: FilterSpec = serde_yaml_ng::from_str("name: split\nargs: [\",\", -1]").unwrap();
+        assert_eq!(spec.args.to_vec(), vec![",".to_string(), "-1".to_string()]);
+    }
+
+    #[test]
+    fn filter_arg_number_displays_as_its_decimal_form() {
+        assert_eq!(FilterArg::Number(-1).to_string(), "-1");
+        assert_eq!(FilterArg::Number(0).to_string(), "0");
+        assert_eq!(FilterArg::Text("|".to_string()).to_string(), "|");
+    }
+
+    #[test]
+    fn login_without_a_method_still_parses() {
+        // postman.yml's login authenticates via `selectorinputs` + `test`
+        // and has no `method` key at all.
+        let yaml = r#"
+id: example
+name: Example
+login:
+  path: index.php
+  selectorinputs:
+    formtoken:
+      selector: input[name="formtoken"]
+      attribute: value
+  test:
+    path: /
+    selector: a[href^="logout.php"]
+search:
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+        let def = parse_definition(yaml).unwrap();
+        let login = def.login.unwrap();
+        assert!(login.method.is_none());
+        assert!(login.selectorinputs.contains_key("formtoken"));
+    }
+
+    #[test]
+    fn a_leading_utf8_bom_is_stripped_before_parsing() {
+        let with_bom = format!("\u{FEFF}{SAMPLE}");
+        let def = parse_definition(&with_bom).unwrap();
+        assert_eq!(def.id, "example");
+    }
+
+    #[test]
+    fn case_entries_keep_document_order_with_the_wildcard_last() {
+        // A `BTreeMap` would sort `'*'` (0x2A) before every alphanumeric
+        // key, which would silently move the catch-all to the front and
+        // make it swallow every other case. `Case` must preserve the
+        // document's original order through deserialization.
+        let yaml = r#"
+'img[src$="/freedownload.gif"]': 0
+'img[src$="/halfdownload.gif"]': 0.5
+'*': 1
+"#;
+        let case: Case = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(
+            case.0,
+            vec![
+                (
+                    r#"img[src$="/freedownload.gif"]"#.to_string(),
+                    "0".to_string()
+                ),
+                (
+                    r#"img[src$="/halfdownload.gif"]"#.to_string(),
+                    "0.5".to_string()
+                ),
+                ("*".to_string(), "1".to_string()),
+            ]
+        );
+        // The wildcard is specifically last, not merely present.
+        assert_eq!(case.0.last().unwrap().0, "*");
+    }
+
+    #[test]
+    fn case_on_a_field_deserializes_within_a_full_definition() {
+        let yaml = r#"
+id: example
+name: Example
+search:
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+    downloadvolumefactor:
+      case:
+        'img[src$="/freedownload.gif"]': 0
+        '*': 1
+"#;
+        let def = parse_definition(yaml).unwrap();
+        let case = def.search.fields["downloadvolumefactor"]
+            .case
+            .as_ref()
+            .unwrap();
+        assert_eq!(case.0.len(), 2);
+        assert_eq!(case.0[1].0, "*");
     }
 }

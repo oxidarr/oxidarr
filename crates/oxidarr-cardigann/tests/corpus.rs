@@ -528,10 +528,16 @@ fn every_definition_matches_the_v11_model() {
     let mut failures = Vec::new();
     for path in definition_paths() {
         let raw = std::fs::read_to_string(&path).unwrap();
-        // The schema file in the corpus is not itself a definition; detect
-        // it by the parsed document actually having a top-level `$schema`
-        // key, not by the substring appearing anywhere in the file's text
-        // (which could match a definition that merely mentions it).
+        // Defensive: a JSON-Schema meta-document living alongside the
+        // definitions would not itself be a definition. `definition_paths`
+        // already restricts to `*.yml`, and as of this corpus (543 files,
+        // none named e.g. `schema.yml`, none with a top-level `$schema`
+        // key) this branch never actually fires — there is no non-definition
+        // `.yml` file to skip. It is kept, precise against the *parsed*
+        // document's top-level key rather than a raw-text substring match
+        // (which could wrongly match a real definition that merely mentions
+        // "$schema" somewhere in a string), in case a schema file is ever
+        // checked into the corpus directory with a `.yml` extension.
         if let Ok(doc) = load_definition(&path)
             && doc.get("$schema").is_some()
         {
