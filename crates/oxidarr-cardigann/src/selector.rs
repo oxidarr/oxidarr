@@ -101,6 +101,17 @@ pub struct CompiledSelector {
 }
 
 impl CompiledSelector {
+    /// True when this selector is a JSON field-path selector (see
+    /// [`is_json_path`]) rather than CSS. An HTML extraction path must check
+    /// this before calling [`select`](Self::select): a `JsonPath` selector
+    /// always selects nothing against an HTML document, and treating that
+    /// silence as "the selector legitimately matched zero elements" would
+    /// hide a definition/engine mismatch instead of surfacing it.
+    #[must_use]
+    pub fn is_json_path(&self) -> bool {
+        matches!(self.kind, SelectorKind::JsonPath)
+    }
+
     /// Selects descendants of `root` matching the CSS, then applies
     /// predicates. Elements are de-duplicated and returned in document
     /// order.
@@ -559,6 +570,14 @@ fn normalize_attribute_value(inner: &str) -> String {
 /// Returns true if `s` is a JSON field-path selector (`$`, `$.field`,
 /// `$[0].id`, `..field`, `items[0].name`) rather than a CSS selector. These
 /// appear in Cardigann definitions whose search response is JSON.
+///
+/// Without a `$` or `..` prefix, only a numeric array index (`[0]`) is an
+/// unambiguous signal: a bare `field.subfield` shape is indistinguishable
+/// from an ordinary CSS class selector (`tr.result`, `td.name`, ...), which
+/// is by far the most common selector shape in the HTML-response corpus.
+/// Treating every dotted identifier as JSON — as an earlier version of this
+/// function did — misclassified virtually every row/field selector of that
+/// form and made every one of them silently select nothing.
 fn is_json_path(s: &str) -> bool {
     if s == "$" {
         return true;
@@ -566,11 +585,10 @@ fn is_json_path(s: &str) -> bool {
     if let Some(rest) = s.strip_prefix("..") {
         return is_identifier(rest);
     }
-    let tail = s.strip_prefix('$').unwrap_or(s);
-    if tail.is_empty() || !(tail.contains('.') || tail.contains('[')) {
-        return false;
+    if let Some(tail) = s.strip_prefix('$') {
+        return !tail.is_empty() && is_path_tail(tail);
     }
-    is_path_tail(tail)
+    s.contains('[') && is_path_tail(s)
 }
 
 fn is_identifier(s: &str) -> bool {
@@ -689,6 +707,29 @@ mod tests {
             ids(r#"tr:contains("Bunny"), tr:contains("Sintel")"#),
             vec!["a", "b"]
         );
+    }
+
+    #[test]
+    fn is_json_path_flags_json_field_paths_but_not_css() {
+        assert!(compile("$.numFound").unwrap().is_json_path());
+        assert!(compile("files[0].name").unwrap().is_json_path());
+        assert!(!compile("tr.result").unwrap().is_json_path());
+    }
+
+    #[test]
+    fn a_bare_class_selector_is_not_mistaken_for_a_json_path() {
+        // `tr.result` is the single most common row selector shape in the
+        // HTML-response corpus. Its `identifier.identifier` shape is
+        // syntactically identical to a JSON dotted path with no `$` or `..`
+        // prefix, so it must not be classified as JSON — that would make
+        // every such selector silently (or, once callers check
+        // `is_json_path`, loudly) fail to match anything.
+        let doc =
+            Html::parse_document(r#"<table><tr id="a" class="result"><td>x</td></tr></table>"#);
+        let root = doc.root_element();
+        let matched = compile("tr.result").unwrap().select(root);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].value().attr("id"), Some("a"));
     }
 
     #[test]

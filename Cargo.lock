@@ -322,6 +322,7 @@ version = "0.0.0"
 name = "oxidarr-cardigann"
 version = "0.0.0"
 dependencies = [
+ "oxidarr-core",
  "regex",
  "scraper",
  "serde",

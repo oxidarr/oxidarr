@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+oxidarr-core = { workspace = true }
 regex = { workspace = true }
 scraper = { workspace = true }
 serde = { workspace = true }
