@@ -5,13 +5,75 @@ use crate::error::CardigannError;
 use regex::Regex;
 
 /// A parsed filter invocation.
+/// A compiled regex, backed by whichever engine can handle the pattern.
+///
+/// Cardigann definitions were written against .NET's regex engine, which
+/// supports look-around (`(?<=\d)`, `(?![-_. ]?DL)`). Rust's `regex` crate
+/// deliberately does not — it guarantees linear time and rejects those
+/// constructs. 33 patterns across the corpus use look-around, so restricting
+/// the engine to `regex` would leave 42 of 543 definitions with filters that
+/// cannot compile at all.
+///
+/// `regex` is tried first so the common case keeps its linear-time guarantee,
+/// and `fancy-regex` (which backtracks) is used only for the patterns `regex`
+/// refuses.
+#[derive(Debug, Clone)]
+pub enum Pattern {
+    /// Linear-time engine, used whenever the pattern permits it.
+    Fast(Box<Regex>),
+    /// Backtracking engine, used only for look-around and backreferences.
+    Fancy(Box<fancy_regex::Regex>),
+}
+
+impl Pattern {
+    /// Compiles `pattern`, preferring the linear-time engine.
+    ///
+    /// # Errors
+    /// Returns an error only when BOTH engines reject the pattern.
+    pub fn compile(pattern: &str) -> Result<Self, String> {
+        match Regex::new(pattern) {
+            Ok(re) => Ok(Self::Fast(Box::new(re))),
+            Err(fast_err) => match fancy_regex::Regex::new(pattern) {
+                Ok(re) => Ok(Self::Fancy(Box::new(re))),
+                Err(fancy_err) => Err(format!("{fast_err} (fancy-regex: {fancy_err})")),
+            },
+        }
+    }
+
+    /// Replaces every match, expanding `$1`-style backreferences.
+    #[must_use]
+    pub fn replace_all(&self, input: &str, replacement: &str) -> String {
+        match self {
+            Self::Fast(re) => re.replace_all(input, replacement).into_owned(),
+            Self::Fancy(re) => re.replace_all(input, replacement).into_owned(),
+        }
+    }
+
+    /// Returns the first capture group, or the whole match when there is none.
+    #[must_use]
+    pub fn first_group(&self, input: &str) -> Option<String> {
+        match self {
+            Self::Fast(re) => re.captures(input).and_then(|c| {
+                c.get(1)
+                    .or_else(|| c.get(0))
+                    .map(|m| m.as_str().to_string())
+            }),
+            Self::Fancy(re) => re.captures(input).ok().flatten().and_then(|c| {
+                c.get(1)
+                    .or_else(|| c.get(0))
+                    .map(|m| m.as_str().to_string())
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Filter {
     /// Regex substitution with capture-group backreferences (`$1`, …).
     ReReplace {
         /// The compiled pattern to match against the input.
-        pattern: Box<Regex>,
+        pattern: Pattern,
         /// The replacement text, which may reference capture groups.
         replacement: String,
     },
@@ -33,7 +95,7 @@ pub enum Filter {
     /// Deferred to the engine, which owns the clock.
     TimeParse(String),
     /// Extracts the first capture group (or the whole match) of a regex.
-    Regexp(Box<Regex>),
+    Regexp(Pattern),
     /// Reads a single query-string parameter from a URL or query string.
     QueryString(String),
     /// A ROW-inclusion filter in real Cardigann: it keeps only result rows
@@ -91,12 +153,10 @@ pub enum Filter {
 pub fn parse_filter(name: &str, args: &[String]) -> Result<Filter, CardigannError> {
     let arg = |i: usize| args.get(i).cloned().unwrap_or_default();
     let compile = |p: &str| {
-        Regex::new(p)
-            .map(Box::new)
-            .map_err(|e| CardigannError::Filter {
-                name: name.to_string(),
-                reason: format!("invalid regex: {e}"),
-            })
+        Pattern::compile(p).map_err(|e| CardigannError::Filter {
+            name: name.to_string(),
+            reason: format!("invalid regex: {e}"),
+        })
     };
 
     Ok(match name {
@@ -151,16 +211,11 @@ pub fn apply(filter: &Filter, input: &str) -> Result<String, CardigannError> {
         Filter::ReReplace {
             pattern,
             replacement,
-        } => pattern
-            .replace_all(input, replacement.as_str())
-            .into_owned(),
+        } => pattern.replace_all(input, replacement.as_str()),
         Filter::Replace { from, to } => input.replace(from.as_str(), to),
         Filter::Append(s) => format!("{input}{s}"),
         Filter::Prepend(s) => format!("{s}{input}"),
-        Filter::Regexp(re) => re
-            .captures(input)
-            .and_then(|c| c.get(1).or_else(|| c.get(0)))
-            .map_or_else(String::new, |m| m.as_str().to_string()),
+        Filter::Regexp(re) => re.first_group(input).unwrap_or_default(),
         Filter::QueryString(key) => query_param(input, key),
         Filter::Split { sep, index } => {
             let parts: Vec<&str> = input.split(sep.as_str()).collect();

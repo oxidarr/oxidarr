@@ -107,6 +107,21 @@ impl CompiledSelector {
     /// always selects nothing against an HTML document, and treating that
     /// silence as "the selector legitimately matched zero elements" would
     /// hide a definition/engine mismatch instead of surfacing it.
+    /// True when `el` ITSELF matches this selector.
+    ///
+    /// Distinct from [`select`], which searches descendants. Cardigann's
+    /// `case:` needs both: a key matches when the selected element matches it
+    /// or when any descendant does.
+    #[must_use]
+    pub fn matches(&self, el: ElementRef<'_>) -> bool {
+        let SelectorKind::Css(branches) = &self.kind else {
+            return false;
+        };
+        branches.iter().any(|branch| {
+            branch.css.matches(&el) && branch.predicates.iter().all(|p| p.matches(el))
+        })
+    }
+
     #[must_use]
     pub fn is_json_path(&self) -> bool {
         matches!(self.kind, SelectorKind::JsonPath)

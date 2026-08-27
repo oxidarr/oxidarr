@@ -89,7 +89,7 @@ fn evaluate_field(
     scope: &template::Scope,
 ) -> Result<String, CardigannError> {
     let mut value = if let Some(case) = &field.case {
-        case_value(case, row)?
+        case_value(case, row, scope)?
     } else if let Some(text) = &field.text {
         template::render(text, scope)?
     } else if let Some(sel) = &field.selector {
@@ -124,14 +124,26 @@ fn evaluate_field(
 /// Returns an empty string if no entry matches (including when `case` is
 /// empty) — the same "produced nothing" outcome as an unmatched
 /// `selector:`, so the caller's `default:` handling applies uniformly.
-fn case_value(case: &Case, row: ElementRef<'_>) -> Result<String, CardigannError> {
+fn case_value(
+    case: &Case,
+    row: ElementRef<'_>,
+    scope: &template::Scope,
+) -> Result<String, CardigannError> {
     for (key, value) in &case.0 {
-        if key == "*" {
-            return Ok(value.clone());
-        }
-        let compiled = compile_html_selector(key)?;
-        if !compiled.select(row).is_empty() {
-            return Ok(value.clone());
+        // Matches Prowlarr's HTML branch: `'*'` is the catch-all, and a key
+        // matches when the selected element ITSELF matches it or any
+        // descendant does. Checking only descendants misses the common
+        // `case:` on the element the selector already found.
+        let matched = if key == "*" {
+            true
+        } else {
+            let compiled = compile_html_selector(key)?;
+            compiled.matches(row) || !compiled.select(row).is_empty()
+        };
+        if matched {
+            // Case values are templates, not literals — `{{ .False }}` has to
+            // render, otherwise the literal braces flow into the release.
+            return template::render(value, scope);
         }
     }
     Ok(String::new())

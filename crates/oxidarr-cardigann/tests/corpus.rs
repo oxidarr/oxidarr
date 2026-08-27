@@ -559,3 +559,80 @@ fn every_definition_matches_the_v11_model() {
             .join("\n")
     );
 }
+
+/// The completion gate for the Cardigann engine: every definition must
+/// validate end to end — model, selectors, filters and templates.
+///
+/// Note this is strictly stronger than `every_selector_parses_as_standard_css`.
+/// That gate only asserts a selector COMPILES; `validate` additionally asserts
+/// it compiles as CSS rather than being misclassified as a JSON field path,
+/// and it reaches `case:` keys and `remove:` selectors, which no earlier gate
+/// inspected at all.
+/// Patterns that .NET's regex engine accepts and BOTH Rust engines reject.
+///
+/// Each entry is (definition, signature, why). These are upstream dialect
+/// differences, not gaps in this crate: `regex` rejects them by design and
+/// `fancy-regex` rejects them too, so there is no engine that would take
+/// them. Keyed on the offending pattern rather than the filename, so every
+/// other selector, filter and template in these same files stays gated.
+const KNOWN_DIALECT_GAPS: &[(&str, &str, &str)] = &[
+    (
+        "girotorrent.yml",
+        r"@[\]^_",
+        "a bare `[` inside a character class is literal in .NET but opens a nested class in Rust",
+    ),
+    (
+        "ilcorsaroblu.yml",
+        r"@[\]^_",
+        "a bare `[` inside a character class is literal in .NET but opens a nested class in Rust",
+    ),
+    (
+        "puntotorrent.yml",
+        r"[\s-_]",
+        r"`\s-_` is a literal set in .NET but reads as a character range in Rust",
+    ),
+    (
+        "1337x.yml",
+        "(eq .Config.disablesort .False))",
+        "unbalanced parenthesis in the TV search path, a genuine upstream typo",
+    ),
+];
+
+#[test]
+fn every_definition_fully_validates() {
+    let mut failures = Vec::new();
+    for path in definition_paths() {
+        let Ok(doc) = load_definition(&path) else {
+            failures.push(format!("{}: does not parse as YAML", path.display()));
+            continue;
+        };
+        if doc.get("$schema").is_some() {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let Ok(def) = oxidarr_cardigann::model::parse_definition(&raw) else {
+            failures.push(format!("{}: does not deserialize", path.display()));
+            continue;
+        };
+        if let Err(e) = oxidarr_cardigann::validate(&def) {
+            let message = e.to_string();
+            let known = KNOWN_DIALECT_GAPS.iter().any(|(file, signature, _)| {
+                path.file_name().is_some_and(|f| f == *file) && message.contains(signature)
+            });
+            if !known {
+                failures.push(format!("{}: {message}", path.display()));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} definitions failed validation:\n{}",
+        failures.len(),
+        failures
+            .iter()
+            .take(15)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
