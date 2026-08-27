@@ -9,7 +9,6 @@
 //! reports an error for anything else, rather than silently guessing.
 
 use crate::error::CardigannError;
-use regex::Regex;
 use std::collections::HashMap;
 
 /// Variable bindings available to a template.
@@ -248,11 +247,22 @@ fn render_nodes(nodes: &[Node], ctx: &Ctx, out: &mut String) -> Result<(), Cardi
                 let text = eval_str(value, ctx);
                 let pattern = eval_str(pattern, ctx);
                 let replacement = eval_str(replacement, ctx);
-                let re = Regex::new(&pattern).map_err(|e| CardigannError::Template {
-                    template: pattern.clone(),
-                    reason: format!("invalid regular expression: {e}"),
+                // Same dual engine as the `re_replace` FILTER, so the two
+                // spellings of one feature cannot diverge: `regex` first,
+                // `fancy-regex` only for look-around it refuses.
+                let re = crate::filters::Pattern::compile(&pattern).map_err(|reason| {
+                    CardigannError::Template {
+                        template: pattern.clone(),
+                        reason: format!("invalid regular expression: {reason}"),
+                    }
                 })?;
-                out.push_str(&re.replace_all(&text, replacement.as_str()));
+                let replaced = re
+                    .replace_all(&text, replacement.as_str())
+                    .map_err(|reason| CardigannError::Template {
+                        template: pattern.clone(),
+                        reason,
+                    })?;
+                out.push_str(&replaced);
             }
             Node::If {
                 cond,

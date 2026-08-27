@@ -22,19 +22,10 @@ use crate::model::Definition;
 pub fn validate(def: &Definition) -> Result<(), CardigannError> {
     check_selector(&def.search.rows.selector)?;
 
-    // Prowlarr picks its HTML or JSON extraction path from the DECLARED
-    // response type, not from the shape of a selector — a JSON definition's
-    // row selector is a bare field name like `data`, which is
-    // indistinguishable from a CSS tag selector. 101 of the 543 definitions
-    // declare `response: {type: json}`; in those, `case:` keys are compared
-    // to the extracted value for equality (CardigannBase.cs:
-    // `value.Equals(case.Key)`) and are literals such as `0%` or `True`,
-    // so validating them as CSS is wrong.
-    let html_mode = !def
-        .search
-        .paths
-        .iter()
-        .any(|p| p.response.as_ref().is_some_and(|r| r.kind == "json"));
+    // `case:` keys are only CSS selectors for HTML definitions; see
+    // `Definition::declares_json_response` for why the declared type is the
+    // only reliable discriminator.
+    let html_mode = !def.declares_json_response();
 
     for spec in &def.search.rows.filters {
         filters::parse_filter(&spec.name, &spec.args.to_vec())?;

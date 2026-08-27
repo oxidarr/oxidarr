@@ -9,30 +9,40 @@ use std::collections::{BTreeMap, HashSet};
 
 /// Runs a definition's row and field extraction over a response body.
 ///
-/// Every field declared in the definition is evaluated for each row and
-/// written into that row's scope as it is produced (under `.Result.<name>`),
-/// so a later field's `text:` template can reference an earlier one's
-/// value. Note that [`crate::model::Search::fields`] is a `BTreeMap`, so
-/// "later" here means alphabetically-later-by-field-name, not the YAML
-/// document's own declaration order — the document order is not preserved
-/// through that map. This matches every corpus idiom actually observed
-/// (fields referencing an internal `_foo`-prefixed helper field defined
-/// alongside them), but is worth flagging if a future definition is found
-/// to depend on true declaration order.
+/// Fields are evaluated in the order the YAML declares them, and each result
+/// is written into that row's scope as it is produced (under `.Result.<name>`),
+/// so a later field's `text:` template can reference an earlier one. Order is
+/// preserved by [`crate::model::Fields`]; it is semantic, not incidental.
+///
+/// This path understands HTML only. A definition whose search response is
+/// declared as JSON is rejected outright rather than run against a parsed
+/// HTML document, where its selectors would match nothing and produce an
+/// empty result indistinguishable from a genuinely empty search.
 ///
 /// # Errors
 ///
-/// Returns [`CardigannError`] if the rows selector, a field's `selector:`,
-/// a `case:` key, or a `remove:` selector fails to compile (including when
-/// any of them is a JSON field-path selector: this extraction path only
-/// understands HTML, so that is treated as an error rather than silently
-/// selecting nothing), or if a field's `text:` template or filter chain
-/// fails.
+/// Returns [`CardigannError`] if the definition declares a JSON response, or
+/// if the rows selector, a field's `selector:`, a `case:` key, or a `remove:`
+/// selector fails to compile, or if a field's `text:` template or filter
+/// chain fails.
 pub fn extract(
     def: &Definition,
     body: &str,
     config: &BTreeMap<String, String>,
 ) -> Result<Vec<Release>, CardigannError> {
+    // Checked from the DECLARED response type, not inferred from selector
+    // shape. 95 of the 101 JSON definitions use a bare-identifier row
+    // selector such as `data` or `item`, which parses as a perfectly valid
+    // CSS tag selector — so shape inference catches only 6 of them and the
+    // rest would silently yield zero releases.
+    if def.declares_json_response() {
+        return Err(CardigannError::Definition {
+            reason: "definition declares a JSON search response; the HTML extraction \
+                     engine cannot read it"
+                .to_string(),
+        });
+    }
+
     let doc = Html::parse_document(body);
     let rows_selector = compile_html_selector(&def.search.rows.selector)?;
 
@@ -631,6 +641,39 @@ search:
         let releases = extract(&def, html, &BTreeMap::new()).unwrap();
         assert_eq!(releases[0].title, "Preferred");
         assert_eq!(releases[1].title, "OnlyFallback");
+    }
+
+    #[test]
+    fn a_json_response_definition_is_rejected_even_with_a_css_shaped_row_selector() {
+        // The shape that matters: 95 of the corpus's 101 JSON definitions use
+        // a bare-identifier row selector like `data`, which parses as a
+        // perfectly valid CSS tag selector. Inferring the mode from selector
+        // shape catches only 6 of them; the rest would run against a parsed
+        // HTML document, match nothing, and return an empty result that looks
+        // exactly like a search with no hits.
+        let yaml = r"
+id: apiish
+name: API-ish
+search:
+  paths:
+    - path: api/torrents
+      response:
+        type: json
+  rows:
+    selector: data
+  fields:
+    title:
+      selector: name
+";
+        let def = parse_definition(yaml).unwrap();
+        let message = match extract(&def, r#"{"data":[{"name":"A"}]}"#, &BTreeMap::new()) {
+            Ok(releases) => format!("accepted, returning {} releases", releases.len()),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            message.contains("JSON"),
+            "a JSON definition must be rejected with an error naming the cause, got: {message}"
+        );
     }
 
     #[test]

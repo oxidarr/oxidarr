@@ -636,3 +636,61 @@ fn every_definition_fully_validates() {
             .join("\n")
     );
 }
+
+/// Every definition declaring a JSON search response must be REJECTED by the
+/// HTML extraction engine, never silently yield zero releases.
+///
+/// This gate exists because nothing else calls `extract()`. The engine
+/// originally inferred JSON-ness from the row selector's shape, which catches
+/// only 6 of these; the other 95 use a bare-identifier selector such as `data`
+/// that parses as valid CSS, so they ran against a parsed HTML document,
+/// matched nothing, and returned an empty result indistinguishable from a
+/// search with no hits.
+#[test]
+fn json_response_definitions_are_rejected_not_silently_empty() {
+    let mut json_defs = 0usize;
+    let mut wrong = Vec::new();
+
+    for path in definition_paths() {
+        let Ok(doc) = load_definition(&path) else {
+            continue;
+        };
+        if doc.get("$schema").is_some() {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let Ok(def) = oxidarr_cardigann::model::parse_definition(&raw) else {
+            continue;
+        };
+        if !def.declares_json_response() {
+            continue;
+        }
+        json_defs += 1;
+        if oxidarr_cardigann::engine::extract(
+            &def,
+            r#"{"data":[{"name":"x"}]}"#,
+            &std::collections::BTreeMap::new(),
+        )
+        .is_ok()
+        {
+            wrong.push(path.display().to_string());
+        }
+    }
+
+    assert!(
+        json_defs > 50,
+        "expected the corpus to contain many JSON definitions, found {json_defs}"
+    );
+    assert!(
+        wrong.is_empty(),
+        "{} of {json_defs} JSON definitions were accepted by the HTML engine \
+         instead of rejected:\n{}",
+        wrong.len(),
+        wrong
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}

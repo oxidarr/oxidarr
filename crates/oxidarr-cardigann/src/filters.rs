@@ -41,11 +41,19 @@ impl Pattern {
     }
 
     /// Replaces every match, expanding `$1`-style backreferences.
-    #[must_use]
-    pub fn replace_all(&self, input: &str, replacement: &str) -> String {
+    ///
+    /// # Errors
+    /// Returns an error when the backtracking engine exceeds its limit. Only
+    /// [`Pattern::Fancy`] can fail: `fancy_regex`'s own `replace_all` unwraps
+    /// that error internally, so `try_replacen` is used instead — a
+    /// tracker-controlled page must not be able to panic the process.
+    pub fn replace_all(&self, input: &str, replacement: &str) -> Result<String, String> {
         match self {
-            Self::Fast(re) => re.replace_all(input, replacement).into_owned(),
-            Self::Fancy(re) => re.replace_all(input, replacement).into_owned(),
+            Self::Fast(re) => Ok(re.replace_all(input, replacement).into_owned()),
+            Self::Fancy(re) => re
+                .try_replacen(input, 0, replacement)
+                .map(std::borrow::Cow::into_owned)
+                .map_err(|e| e.to_string()),
         }
     }
 
@@ -211,7 +219,12 @@ pub fn apply(filter: &Filter, input: &str) -> Result<String, CardigannError> {
         Filter::ReReplace {
             pattern,
             replacement,
-        } => pattern.replace_all(input, replacement.as_str()),
+        } => pattern
+            .replace_all(input, replacement.as_str())
+            .map_err(|reason| CardigannError::Filter {
+                name: "re_replace".to_string(),
+                reason,
+            })?,
         Filter::Replace { from, to } => input.replace(from.as_str(), to),
         Filter::Append(s) => format!("{input}{s}"),
         Filter::Prepend(s) => format!("{s}{input}"),

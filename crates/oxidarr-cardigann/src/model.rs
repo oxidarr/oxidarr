@@ -237,6 +237,22 @@ pub struct Field {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Case(pub Vec<(String, String)>);
 
+impl Definition {
+    /// True when the search response is declared as JSON rather than HTML.
+    ///
+    /// This is the only reliable discriminator. A JSON definition's row
+    /// selector is a bare field name like `data` or `item`, which is
+    /// indistinguishable from a CSS tag selector — inferring the mode from
+    /// selector shape identifies only 6 of the corpus's 101 JSON definitions.
+    #[must_use]
+    pub fn declares_json_response(&self) -> bool {
+        self.search
+            .paths
+            .iter()
+            .any(|p| p.response.as_ref().is_some_and(|r| r.kind == "json"))
+    }
+}
+
 /// The `search.fields` mapping, preserving YAML declaration order.
 ///
 /// Order is semantic. A field's `text:` may reference an earlier field through
