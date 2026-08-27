@@ -115,7 +115,7 @@ pub struct Search {
     #[serde(default)]
     pub headers: BTreeMap<String, Vec<String>>,
     pub rows: Rows,
-    pub fields: BTreeMap<String, Field>,
+    pub fields: Fields,
     /// Response-level error detection, distinct from row-level filters.
     #[serde(default)]
     pub error: Vec<ErrorRule>,
@@ -193,6 +193,15 @@ pub struct Field {
     pub attribute: Option<String>,
     #[serde(default)]
     pub text: Option<String>,
+    /// Cardigann's marker for a field that may legitimately produce nothing.
+    ///
+    /// Parsed but NOT yet acted on. The extraction engine currently lets every
+    /// field degrade to an empty value or its `default:`, so the distinction
+    /// between "allowed to be absent" and "failing to match is a real problem"
+    /// is not enforced. Honouring it means deciding what a non-optional field
+    /// with no match and no default should do to its row — skip it, or fail
+    /// the extraction — which belongs with the request/response work in the
+    /// next plan rather than here.
     #[serde(default)]
     pub optional: bool,
     #[serde(default)]
@@ -227,6 +236,94 @@ pub struct Field {
 /// document's original key order, and keeps that order in a `Vec`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Case(pub Vec<(String, String)>);
+
+/// The `search.fields` mapping, preserving YAML declaration order.
+///
+/// Order is semantic. A field's `text:` may reference an earlier field through
+/// `.Result.<name>`, so evaluation has to follow declaration order. A
+/// `BTreeMap` sorts by name and silently breaks that: `1337x.yml` declares
+/// `title_default` and `title_optional` before `title`, but `"title"` sorts
+/// before both, so a sorted pass evaluates the consumer before its inputs
+/// exist and every `.Result.*` lookup resolves to the empty string — an empty
+/// title on every row.
+#[derive(Debug, Clone, Default)]
+pub struct Fields(Vec<(String, Field)>);
+
+impl Fields {
+    /// Iterates the fields in declaration order.
+    pub fn iter(&self) -> std::slice::Iter<'_, (String, Field)> {
+        self.0.iter()
+    }
+
+    /// Looks a field up by name.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&Field> {
+        self.0.iter().find(|(key, _)| key == name).map(|(_, v)| v)
+    }
+
+    /// Returns true when a field of this name is declared.
+    #[must_use]
+    pub fn contains_key(&self, name: &str) -> bool {
+        self.get(name).is_some()
+    }
+
+    /// Number of declared fields.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// True when no fields are declared.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<'a> IntoIterator for &'a Fields {
+    type Item = &'a (String, Field);
+    type IntoIter = std::slice::Iter<'a, (String, Field)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<'de> Deserialize<'de> for Fields {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct FieldsVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for FieldsVisitor {
+            type Value = Fields;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a mapping of field name to field definition")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Fields, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                // Values are read straight from the underlying deserializer
+                // rather than through an intermediate `Value`. That matters:
+                // `serde_yaml_ng` coerces a bare scalar into a `String` when
+                // deserializing directly (definitions really do write
+                // `text: 0`), but loses that coercion when routed through
+                // `Value` + `from_value`.
+                let mut entries = Vec::with_capacity(map.size_hint().unwrap_or(0));
+                while let Some(key) = map.next_key::<String>()? {
+                    entries.push((key, map.next_value::<Field>()?));
+                }
+                Ok(Fields(entries))
+            }
+        }
+
+        deserializer.deserialize_map(FieldsVisitor)
+    }
+}
 
 impl<'de> Deserialize<'de> for Case {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -510,9 +607,14 @@ search:
     #[test]
     fn field_attribute_is_optional() {
         let def = parse_definition(SAMPLE).unwrap();
-        assert!(def.search.fields["title"].attribute.is_none());
+        assert!(def.search.fields.get("title").unwrap().attribute.is_none());
         assert_eq!(
-            def.search.fields["download"].attribute.as_deref(),
+            def.search
+                .fields
+                .get("download")
+                .unwrap()
+                .attribute
+                .as_deref(),
             Some("href")
         );
     }
@@ -658,7 +760,11 @@ search:
         '*': 1
 "#;
         let def = parse_definition(yaml).unwrap();
-        let case = def.search.fields["downloadvolumefactor"]
+        let case = def
+            .search
+            .fields
+            .get("downloadvolumefactor")
+            .unwrap()
             .case
             .as_ref()
             .unwrap();

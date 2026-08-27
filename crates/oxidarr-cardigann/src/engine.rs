@@ -285,8 +285,17 @@ fn parse_size(input: &str) -> Option<u64> {
     // Bound the fraction so `10u64.pow(places)` cannot overflow. The
     // characters are guaranteed ASCII digits by the `take_while` above, so
     // slicing on a byte index is safe.
+    // A second dot means the input is malformed (`1.2.3 GB`). Fail closed
+    // rather than silently reading it as `1 GB`.
+    if frac_raw.contains('.') {
+        return None;
+    }
     let frac_str = &frac_raw[..frac_raw.len().min(6)];
-    let frac: u64 = frac_str.parse().unwrap_or(0);
+    let frac: u64 = if frac_str.is_empty() {
+        0
+    } else {
+        frac_str.parse().ok()?
+    };
     let places = u32::try_from(frac_str.len()).unwrap_or(0);
 
     let unit: String = cleaned
@@ -492,6 +501,124 @@ search:
         let def = parse_definition(yaml).unwrap();
         let releases = extract(&def, html, &BTreeMap::new()).unwrap();
         assert_eq!(releases[0].title, "Big Buck Bunny");
+    }
+
+    #[test]
+    fn remove_strips_elements_nested_several_levels_deep() {
+        let yaml = r"
+id: simple
+name: Simple
+search:
+  rows:
+    selector: tr.result
+  fields:
+    title:
+      selector: td.name
+      remove: span.tag
+";
+        let html = r#"<table><tr class="result"><td class="name">Big Buck<div><em><span class="tag"> NEW</span></em></div> Bunny</td></tr></table>"#;
+        let def = parse_definition(yaml).unwrap();
+        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        assert_eq!(releases[0].title, "Big Buck Bunny");
+    }
+
+    #[test]
+    fn remove_strips_multiple_sibling_elements() {
+        let yaml = r"
+id: simple
+name: Simple
+search:
+  rows:
+    selector: tr.result
+  fields:
+    title:
+      selector: td.name
+      remove: span.tag
+";
+        let html = r#"<table><tr class="result"><td class="name"><span class="tag">[X]</span>Big<span class="tag">[Y]</span> Buck<span class="tag">[Z]</span> Bunny</td></tr></table>"#;
+        let def = parse_definition(yaml).unwrap();
+        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        assert_eq!(releases[0].title, "Big Buck Bunny");
+    }
+
+    #[test]
+    fn malformed_size_is_none_rather_than_a_wrong_guess() {
+        // `1.2.3 GB` must not silently read as `1 GB`.
+        assert_eq!(parse_size("1.2.3 GB"), None);
+        assert_eq!(parse_size(""), None);
+        assert_eq!(parse_size("N/A"), None);
+        assert_eq!(parse_size("700 MB"), Some(700 * 1024 * 1024));
+    }
+
+    #[test]
+    fn date_and_categories_are_deliberately_unmapped_in_this_plan() {
+        // Pinning a KNOWN LIMITATION, not asserting desired behaviour.
+        //
+        // `publish_date` needs the date filters (`dateparse`, `timeago`,
+        // `fuzzytime`, `timeparse`), which are identity no-ops until the
+        // engine is given a clock, and `categories` needs the
+        // `caps.categorymappings` subsystem. Both land in the next plan.
+        // Until then these two stay empty even when the definition extracts
+        // them, so this test exists to make that visible and to fail loudly
+        // the moment someone wires either one up without revisiting it.
+        let yaml = r"
+id: simple
+name: Simple
+search:
+  rows:
+    selector: tr.result
+  fields:
+    title:
+      selector: td.name
+    date:
+      selector: td.date
+    category:
+      selector: td.cat
+";
+        let html = r#"<table><tr class="result"><td class="name">A</td><td class="date">2024-01-01</td><td class="cat">2000</td></tr></table>"#;
+        let def = parse_definition(yaml).unwrap();
+        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        assert_eq!(releases[0].title, "A");
+        assert!(
+            releases[0].publish_date.is_none(),
+            "publish_date is unmapped until the date filters get a clock"
+        );
+        assert!(
+            releases[0].categories.is_empty(),
+            "categories are unmapped until caps.categorymappings is implemented"
+        );
+    }
+
+    #[test]
+    fn fields_evaluate_in_declaration_order_not_alphabetical_order() {
+        // Cardigann fields reference earlier fields through `.Result.<name>`,
+        // so evaluation must follow DECLARATION order. Sorting by name breaks
+        // it: this is the real shape used by 1337x.yml, which declares
+        // `title_default` and `title_optional` before `title` — and "title"
+        // sorts before both, so an alphabetical pass evaluates the consumer
+        // first and every `.Result.*` lookup resolves to the empty string.
+        let yaml = r"
+id: simple
+name: Simple
+search:
+  rows:
+    selector: tr.result
+  fields:
+    title_default:
+      selector: td.fallback
+    title_optional:
+      selector: td.preferred
+    title:
+      text: '{{ if .Result.title_optional }}{{ .Result.title_optional }}{{ else }}{{ .Result.title_default }}{{ end }}'
+";
+        let html = r#"<table>
+            <tr class="result"><td class="fallback">Fallback</td><td class="preferred">Preferred</td></tr>
+            <tr class="result"><td class="fallback">OnlyFallback</td></tr>
+        </table>"#;
+        let def = parse_definition(yaml).unwrap();
+        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        assert_eq!(releases[0].title, "Preferred");
+        assert_eq!(releases[1].title, "OnlyFallback");
     }
 
     #[test]
