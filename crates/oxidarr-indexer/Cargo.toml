@@ -14,6 +14,7 @@ oxidarr-cardigann = { workspace = true }
 url = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
