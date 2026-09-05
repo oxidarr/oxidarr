@@ -72,11 +72,27 @@ impl Settings {
 
 /// Builds the [`Scope`] a definition's templates render against for one
 /// search: `.Config.*` from `s`'s resolved settings, `.Keywords` and
-/// `.Query.Keywords` as the query's keywords joined with a single space,
-/// `.Query.Q` as the raw (unsplit, unlowercased) query string, and
-/// `.Query.IMDBID`/`.Query.Season`/`.Query.Ep` from the matching
-/// `SearchQuery` field — each an empty string when its field is absent, per
-/// Plan 1's "unset variable renders empty" semantics.
+/// `.Query.Keywords` as the raw (unsplit, unlowercased) query string,
+/// `.Query.Q` likewise, and `.Query.IMDBID`/`.Query.Season`/`.Query.Ep` from
+/// the matching `SearchQuery` field — each an empty string when its field is
+/// absent, per Plan 1's "unset variable renders empty" semantics.
+///
+/// `.Keywords`/`.Query.Keywords` are the raw query text, not
+/// [`SearchQuery::keywords`]'s lowercased/whitespace-split tokens.
+/// Jackett's `CardigannIndexer.PerformQuery` (src/Jackett.Common/Indexers/
+/// Definitions/CardigannIndexer.cs:1416, 1467-1479) builds `.Query.Keywords`
+/// by joining `KeywordTokens` — `.Query.Q` (`query.SearchTerm`, verbatim,
+/// never lowercased) plus a handful of TV/movie-specific tokens this crate
+/// does not model — and then sets `.Keywords` to that value run through
+/// `Search.Keywordsfilters` (a no-op when a definition declares none, which
+/// is the common case this crate currently handles). There is no
+/// lowercasing or word-splitting anywhere in that path, so reusing
+/// `keywords()` here would diverge from every real Cardigann template that
+/// inspects casing or exact spacing (e.g. a `re_replace` matching literal
+/// whitespace runs). `keywords()` itself is kept as-is: it is not used here
+/// any more, but is a plausible building block for the title-matching filter
+/// Jackett applies separately (`query.MatchQueryStringAND`, same file,
+/// ~line 2458), which is out of this task's scope.
 #[must_use]
 pub fn scope_for(def: &Definition, q: &SearchQuery, s: &Settings) -> Scope {
     let mut scope = Scope::new();
@@ -85,10 +101,10 @@ pub fn scope_for(def: &Definition, q: &SearchQuery, s: &Settings) -> Scope {
         scope.set_config(&key, &value);
     }
 
-    let keywords = q.keywords().join(" ");
-    scope.set_keywords(&keywords);
-    scope.set_query("Keywords", &keywords);
-    scope.set_query("Q", q.q.as_deref().unwrap_or_default());
+    let raw_query = q.q.as_deref().unwrap_or_default();
+    scope.set_keywords(raw_query);
+    scope.set_query("Keywords", raw_query);
+    scope.set_query("Q", raw_query);
     scope.set_query("IMDBID", q.imdb_id.as_deref().unwrap_or_default());
     scope.set_query(
         "Season",
@@ -183,7 +199,7 @@ search:
     }
 
     #[test]
-    fn scope_for_joins_keywords_into_query_keywords_and_top_level_keywords() {
+    fn scope_for_mirrors_the_raw_query_into_keywords_and_query_keywords() {
         let def = definition_with_sort_setting();
         let query = SearchQuery {
             q: Some("Big Buck Bunny".to_string()),
@@ -193,7 +209,26 @@ search:
 
         assert_eq!(
             render("{{ .Keywords }}|{{ .Query.Keywords }}", &scope).unwrap(),
-            "big buck bunny|big buck bunny"
+            "Big Buck Bunny|Big Buck Bunny"
+        );
+    }
+
+    #[test]
+    fn scope_for_does_not_lowercase_or_normalise_whitespace_in_keywords() {
+        // Jackett's `.Query.Keywords` is `query.SearchTerm` verbatim (see
+        // `scope_for`'s doc comment) — no case folding, no whitespace
+        // collapsing. `SearchQuery::keywords()` does both, so this proves
+        // `scope_for` does not route through it.
+        let def = definition_with_sort_setting();
+        let query = SearchQuery {
+            q: Some("Big  Buck\tBunny".to_string()),
+            ..SearchQuery::default()
+        };
+        let scope = scope_for(&def, &query, &Settings::default());
+
+        assert_eq!(
+            render("{{ .Keywords }}", &scope).unwrap(),
+            "Big  Buck\tBunny"
         );
     }
 
