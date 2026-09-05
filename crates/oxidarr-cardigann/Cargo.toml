@@ -9,6 +9,13 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+oxidarr-core = { workspace = true }
+regex = { workspace = true }
+fancy-regex = { workspace = true }
+scraper = { workspace = true }
+serde = { workspace = true }
+serde_yaml_ng = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

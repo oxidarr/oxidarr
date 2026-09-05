@@ -14,4 +14,7 @@
 # local working notes, never published
 /.local/
 
+# third-party indexer definitions, fetched not vendored
+/.definitions/
+
 .DS_Store
