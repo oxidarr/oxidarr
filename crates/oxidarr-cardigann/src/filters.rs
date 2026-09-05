@@ -2,14 +2,16 @@
 //! enum by frequency of use.
 
 use crate::error::CardigannError;
-use chrono::{DateTime, TimeZone, Utc};
+use crate::netlayout::net_layout_to_chrono;
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use regex::Regex;
 
 /// Context threaded through filter evaluation: the values a real Cardigann
 /// engine reads from its environment rather than from the row being
 /// processed — the wall clock (for `dateparse`/`timeparse`/`timeago`/
 /// `fuzzytime`) and the search's keywords (for `andmatch`'s row-inclusion
-/// check). Neither is read by [`apply`] yet — see the identity-pass-through
+/// check). `dateparse`/`timeparse` read `now` (see [`apply`]'s match arm);
+/// `timeago`/`fuzzytime`/`andmatch` do not yet — see the identity-pass-through
 /// comments on those filters' match arms — but the parameter exists now so
 /// later plans that implement them do not need to touch every call site
 /// again.
@@ -258,24 +260,22 @@ pub fn parse_filter(name: &str, args: &[String]) -> Result<Filter, CardigannErro
 /// Applies a filter to a value.
 ///
 /// `ctx` carries the clock and search keywords a real Cardigann engine
-/// consults outside the row itself; see [`FilterCtx`]. It is not read by any
-/// match arm yet, since the filters that will need it (`dateparse`,
-/// `timeparse`, `timeago`, `fuzzytime`, `andmatch`) are still identity
-/// pass-throughs.
+/// consults outside the row itself; see [`FilterCtx`]. `dateparse`/
+/// `timeparse` read `ctx.now`; the filters that still need it (`timeago`,
+/// `fuzzytime`, `andmatch`) are, for now, identity pass-throughs.
 ///
 /// # Errors
 ///
 /// This implementation never fails at apply time — all argument validation
-/// happens in [`parse_filter`] — but the signature returns a `Result`
-/// because some filters (notably date/time parsing, once the engine grows
-/// a clock) may need to fail here in the future.
+/// happens in [`parse_filter`], and unparseable `dateparse`/`timeparse`
+/// input passes through unchanged rather than erroring (Prowlarr tolerates
+/// junk rows; dropping them is not this filter's job) — but the signature
+/// returns a `Result` because a future filter may need to fail here.
 pub fn apply(
     filter: &Filter,
     input: &str,
     ctx: &FilterCtx,
 ) -> Result<FilterOutcome, CardigannError> {
-    // Not yet read by any arm below; see the doc comment above.
-    let _ = ctx;
     Ok(FilterOutcome::Value(match filter {
         Filter::ReReplace {
             pattern,
@@ -313,21 +313,107 @@ pub fn apply(
             .collect(),
         Filter::Diacritics => fold_diacritics(input),
         Filter::Validate(whitelist) => validate_intersect(input, whitelist),
-        // Date/time evaluation is delegated to the engine, which owns the
-        // clock: these are recognized (so a definition using them is not
-        // rejected as unknown) but not yet evaluated, and pass the input
-        // through unchanged until a later plan gives the engine a clock.
-        Filter::DateParse(_) | Filter::TimeParse(_) | Filter::TimeAgo | Filter::FuzzyTime => {
-            input.to_string()
+        // `dateparse` and `timeparse` share one .NET-layout parser: the
+        // input passes through unchanged when the layout does not
+        // translate or nothing matches it (Prowlarr tolerates junk rows;
+        // dropping them is not this filter's job).
+        Filter::DateParse(layout) | Filter::TimeParse(layout) => {
+            parse_net_datetime(layout, input, ctx)
+                .map_or_else(|| input.to_string(), |dt| dt.to_rfc3339())
         }
-        // `andmatch` cannot be implemented as a value transform at all
-        // (see the `AndMatch` doc comment): today every one of the 59+
-        // trackers in the corpus that use it accepts all rows regardless
-        // of query relevance, matching a currently-open upstream Prowlarr
-        // defect (Prowlarr/Prowlarr#1270) where its own `andmatch` case
-        // also parses arguments and then does nothing with them.
-        Filter::AndMatch => input.to_string(),
+        // `timeago`/`fuzzytime` evaluation is deferred to a later plan
+        // (Tasks 4 and 6); `andmatch` cannot be implemented as a value
+        // transform at all (see the `AndMatch` doc comment) — today every
+        // one of the 59+ trackers in the corpus that use it accepts all
+        // rows regardless of query relevance, matching a currently-open
+        // upstream Prowlarr defect (Prowlarr/Prowlarr#1270) where its own
+        // `andmatch` case also parses arguments and then does nothing
+        // with them. All three are recognized (so a definition using them
+        // is not rejected as unknown) but not yet evaluated, and pass the
+        // input through unchanged.
+        Filter::TimeAgo | Filter::FuzzyTime | Filter::AndMatch => input.to_string(),
     }))
+}
+
+/// Parses `input` against a .NET custom date-format `layout`
+/// (`dateparse`/`timeparse`'s single argument), returning the parsed
+/// instant normalised to UTC, or `None` if the layout does not translate
+/// or `input` does not match it in any of the shapes tried below.
+///
+/// The layout is translated once via [`net_layout_to_chrono`] and its
+/// fractional-second sequence normalised (see [`normalize_fractional_seconds`])
+/// before any parse is attempted. When the translated format carries an
+/// offset spec (`%:z`/`%z`), [`DateTime::parse_from_str`] is tried first;
+/// a corpus layout advertising an offset (`zzz`) but a scraped value that
+/// omits it is common enough that a failure there is retried with the
+/// offset token stripped from the format, falling back to
+/// [`parse_naive`] (which assumes UTC). A format without an offset spec
+/// goes straight to [`parse_naive`].
+fn parse_net_datetime(layout: &str, input: &str, ctx: &FilterCtx) -> Option<DateTime<Utc>> {
+    let format = net_layout_to_chrono(layout).ok()?;
+    let format = normalize_fractional_seconds(&format);
+
+    if format_has_offset(&format) {
+        if let Ok(dt) = DateTime::parse_from_str(input, &format) {
+            return Some(dt.with_timezone(&Utc));
+        }
+        let stripped = strip_trailing_offset(&format);
+        return parse_naive(&stripped, input, ctx);
+    }
+    parse_naive(&format, input, ctx)
+}
+
+/// Whether a translated chrono format carries an offset directive
+/// (`%:z`, from .NET's `zzz`/`K`, or `%z`, from `zz`).
+fn format_has_offset(format: &str) -> bool {
+    format.contains("%:z") || format.contains("%z")
+}
+
+/// Strips a trailing offset directive (with or without a preceding
+/// space) from a translated chrono format, for the offset-missing retry
+/// in [`parse_net_datetime`]. Corpus layouts place the offset token at
+/// the end (`"... zzz"`), so only a trailing match is stripped; a format
+/// with no matching suffix is returned unchanged.
+fn strip_trailing_offset(format: &str) -> String {
+    for suffix in [" %:z", "%:z", " %z", "%z"] {
+        if let Some(stripped) = format.strip_suffix(suffix) {
+            return stripped.to_string();
+        }
+    }
+    format.to_string()
+}
+
+/// Parses `input` against an offset-free chrono `format`, assuming UTC.
+/// Tries, in order: a full datetime, a date only (midnight UTC), and a
+/// time only (`timeparse`'s whole reason for existing is a layout with no
+/// date component — `ctx.now`'s date fills that gap). Returns `None` if
+/// none of the three match.
+fn parse_naive(format: &str, input: &str, ctx: &FilterCtx) -> Option<DateTime<Utc>> {
+    if let Ok(ndt) = NaiveDateTime::parse_from_str(input, format) {
+        return Some(Utc.from_utc_datetime(&ndt));
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(input, format) {
+        let ndt = date.and_hms_opt(0, 0, 0)?;
+        return Some(Utc.from_utc_datetime(&ndt));
+    }
+    if let Ok(time) = NaiveTime::parse_from_str(input, format) {
+        let ndt = ctx.now.date_naive().and_time(time);
+        return Some(Utc.from_utc_datetime(&ndt));
+    }
+    None
+}
+
+/// Collapses `.%.3f` (a literal dot immediately followed by chrono's
+/// `%.3f` fractional-second directive, which itself renders/expects a
+/// leading dot of its own) down to `%.3f`.
+///
+/// [`net_layout_to_chrono`] translates .NET's `fff` token to `%.3f`
+/// verbatim, so a corpus layout written `ss.fff` (a literal dot, then
+/// `fff`) becomes `%S.%.3f` — a format expecting two dots in the input
+/// where a real value (`00.123`) has only one, so it would never parse
+/// without this normalisation.
+fn normalize_fractional_seconds(format: &str) -> String {
+    format.replace(".%.3f", "%.3f")
 }
 
 fn query_param(input: &str, key: &str) -> String {
@@ -602,10 +688,13 @@ mod tests {
     use super::*;
 
     fn run(name: &str, args: &[&str], input: &str) -> String {
+        run_ctx(name, args, input, &FilterCtx::fixed_for_tests())
+    }
+
+    fn run_ctx(name: &str, args: &[&str], input: &str, ctx: &FilterCtx) -> String {
         let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let f = parse_filter(name, &args).unwrap();
-        let ctx = FilterCtx::fixed_for_tests();
-        match apply(&f, input, &ctx).unwrap() {
+        match apply(&f, input, ctx).unwrap() {
             FilterOutcome::Value(v) => v,
             FilterOutcome::DropRow => {
                 unreachable!("no filter in this test suite emits DropRow")
@@ -831,23 +920,93 @@ mod tests {
     }
 
     #[test]
-    fn dateparse_timeparse_timeago_fuzzytime_and_andmatch_pass_through_unchanged() {
-        // None of these five are evaluated yet: `dateparse`/`timeparse`/
-        // `timeago`/`fuzzytime` need a clock the engine does not own
-        // until a later plan, and `andmatch` cannot be expressed by
-        // `apply`'s `&str -> String` signature at all (it is a
-        // row-inclusion filter, not a value transform). Pinning today's
-        // no-op behavior here means the day any of them gets a real
-        // implementation, this test fails and has to be updated as a
-        // deliberate, visible diff — not silently.
-        assert_eq!(
-            run("dateparse", &["ddd, dd MMM yyyy"], "irrelevant"),
-            "irrelevant"
-        );
-        assert_eq!(run("timeparse", &["HH:mm:ss"], "irrelevant"), "irrelevant");
+    fn timeago_fuzzytime_and_andmatch_pass_through_unchanged() {
+        // `timeago`/`fuzzytime` need a clock the engine does not own until
+        // a later plan (Tasks 4 and 6 respectively), and `andmatch` cannot
+        // be expressed by `apply`'s `&str -> String` signature at all (it
+        // is a row-inclusion filter, not a value transform). Pinning
+        // today's no-op behavior here means the day any of them gets a
+        // real implementation, this test fails and has to be updated as a
+        // deliberate, visible diff — not silently. `dateparse`/`timeparse`
+        // used to be pinned here too; they now have real tests below.
         assert_eq!(run("timeago", &[], "3 hours ago"), "3 hours ago");
         assert_eq!(run("fuzzytime", &[], "yesterday"), "yesterday");
         assert_eq!(run("andmatch", &[], "some row text"), "some row text");
+    }
+
+    #[test]
+    fn dateparse_emits_rfc3339() {
+        let ctx = FilterCtx::fixed_for_tests();
+        assert_eq!(
+            run_ctx(
+                "dateparse",
+                &["yyyy-MM-dd HH:mm:ss"],
+                "2025-03-09 18:30:00",
+                &ctx
+            ),
+            "2025-03-09T18:30:00+00:00"
+        );
+    }
+
+    #[test]
+    fn dateparse_with_offset_keeps_the_offset() {
+        let ctx = FilterCtx::fixed_for_tests();
+        assert_eq!(
+            run_ctx(
+                "dateparse",
+                &["yyyy-MM-dd HH:mm:ss zzz"],
+                "2025-03-09 18:30:00 +02:00",
+                &ctx
+            ),
+            "2025-03-09T16:30:00+00:00"
+        );
+    }
+
+    #[test]
+    fn timeparse_fills_missing_date_from_ctx_now() {
+        let ctx = FilterCtx::fixed_for_tests(); // 2026-01-15
+        assert_eq!(
+            run_ctx("timeparse", &["HH:mm"], "18:30", &ctx),
+            "2026-01-15T18:30:00+00:00"
+        );
+    }
+
+    #[test]
+    fn unparseable_date_passes_through() {
+        let ctx = FilterCtx::fixed_for_tests();
+        assert_eq!(run_ctx("dateparse", &["yyyy-MM-dd"], "n/a", &ctx), "n/a");
+    }
+
+    #[test]
+    fn dateparse_layout_advertising_an_offset_still_parses_a_value_without_one() {
+        // Corpus layouts often end in `zzz`, but the scraped value
+        // frequently omits the offset entirely. When the offset-aware
+        // parse fails, the offset token is stripped from the format and
+        // the value is retried naive, assumed UTC.
+        let ctx = FilterCtx::fixed_for_tests();
+        assert_eq!(
+            run_ctx(
+                "dateparse",
+                &["yyyy-MM-dd HH:mm:ss zzz"],
+                "2025-03-09 18:30:00",
+                &ctx
+            ),
+            "2025-03-09T18:30:00+00:00"
+        );
+    }
+
+    #[test]
+    fn timeparse_fractional_second_layout_parses_a_single_dot() {
+        // KNOWN ISSUE: `net_layout_to_chrono` maps `fff` to `%.3f`, which
+        // itself renders/expects a leading dot. A corpus layout written
+        // `ss.fff` (a literal dot, then `fff`) would otherwise translate
+        // to a doubled dot (`%S.%.3f`) that never matches a real value's
+        // single dot — it must be collapsed before reaching chrono.
+        let ctx = FilterCtx::fixed_for_tests();
+        assert_eq!(
+            run_ctx("timeparse", &["HH:mm:ss.fff"], "18:30:00.123", &ctx),
+            "2026-01-15T18:30:00.123+00:00"
+        );
     }
 
     #[test]

@@ -523,6 +523,106 @@ fn every_filter_used_by_the_corpus_is_implemented() {
     assert!(missing.is_empty(), "unimplemented filters: {missing:?}");
 }
 
+/// Recursively collects the layout argument of every `dateparse`/
+/// `timeparse` filter invocation in a definition, walking the same
+/// filter-invocation sites [`collect_filter_names`] does (`filters:`,
+/// `dateheaders:`'s nested `filters:`, `keywordsfilters:`).
+fn collect_date_time_layouts(node: &serde_yaml_ng::Value, out: &mut Vec<String>) {
+    match node {
+        serde_yaml_ng::Value::Mapping(map) => {
+            for (k, v) in map {
+                if matches!(
+                    k.as_str(),
+                    Some("filters" | "dateheaders" | "keywordsfilters")
+                ) && let Some(seq) = v.as_sequence()
+                {
+                    for item in seq {
+                        let is_date_or_time = item
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .is_some_and(|name| matches!(name, "dateparse" | "timeparse"));
+                        if !is_date_or_time {
+                            continue;
+                        }
+                        if let Some(layout) = item.get("args").and_then(first_filter_arg) {
+                            out.push(layout);
+                        }
+                    }
+                }
+                collect_date_time_layouts(v, out);
+            }
+        }
+        serde_yaml_ng::Value::Sequence(seq) => {
+            for v in seq {
+                collect_date_time_layouts(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Reads a filter's first argument out of its raw `args:` value, which is
+/// a bare scalar for a single-argument filter like `dateparse`/
+/// `timeparse` (`args: "yyyy-MM-dd"`) but a sequence for filters that take
+/// more than one (`args: ["|", -1]`).
+fn first_filter_arg(args: &serde_yaml_ng::Value) -> Option<String> {
+    match args {
+        serde_yaml_ng::Value::String(s) => Some(s.clone()),
+        serde_yaml_ng::Value::Sequence(seq) => seq.first().and_then(scalar_to_string),
+        other => scalar_to_string(other),
+    }
+}
+
+fn scalar_to_string(v: &serde_yaml_ng::Value) -> Option<String> {
+    match v {
+        serde_yaml_ng::Value::String(s) => Some(s.clone()),
+        serde_yaml_ng::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// Asserts every `dateparse`/`timeparse` layout argument in the corpus
+/// translates via [`oxidarr_cardigann::net_layout_to_chrono`] — the same
+/// .NET-layout translator `filters::apply` calls at request time. A
+/// layout that fails here would fail identically (and silently, since
+/// `dateparse`/`timeparse` pass unparseable input through unchanged)
+/// against real tracker results.
+#[test]
+fn every_dateparse_timeparse_layout_translates() {
+    let mut total = 0usize;
+    let mut failed = Vec::new();
+
+    for path in definition_paths() {
+        let Ok(doc) = load_definition(&path) else {
+            continue;
+        };
+        let mut layouts = Vec::new();
+        collect_date_time_layouts(&doc, &mut layouts);
+        for layout in layouts {
+            total += 1;
+            if oxidarr_cardigann::net_layout_to_chrono(&layout).is_err() {
+                failed.push(format!("{}: {layout:?}", path.display()));
+            }
+        }
+    }
+
+    assert!(
+        total > 400,
+        "expected 400+ dateparse/timeparse layouts, found {total}"
+    );
+    assert!(
+        failed.is_empty(),
+        "{} of {total} dateparse/timeparse layouts failed to translate:\n{}",
+        failed.len(),
+        failed
+            .iter()
+            .take(15)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
 #[test]
 fn every_definition_matches_the_v11_model() {
     let mut failures = Vec::new();

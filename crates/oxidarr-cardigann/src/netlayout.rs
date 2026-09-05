@@ -10,15 +10,9 @@
 //! targets .NET instead. chrono has no `strftime` support for either
 //! by-example dialect, so a layout must be translated into a
 //! `strftime`-style format string before chrono can use it. This module
-//! owns exactly that translation, so Task 3's dateparse/timeparse
-//! implementation can call it without knowing anything about .NET's
-//! layout vocabulary.
-//!
-//! Nothing calls [`net_layout_to_chrono`] yet — the engine gains a
-//! `dateparse`/`timeparse` implementation that does in a later plan — so
-//! this module is allowed to be dead code for now rather than rejected by
-//! the workspace's deny-warnings lint pass.
-#![allow(dead_code)]
+//! owns exactly that translation, so [`crate::filters`]'s
+//! `dateparse`/`timeparse` implementation can call it without knowing
+//! anything about .NET's layout vocabulary.
 
 use crate::error::CardigannError;
 
@@ -94,7 +88,12 @@ const TOKENS: &[TokenMapping] = &[
 /// fixed vocabulary of letter runs, so an unrecognized one is always a
 /// mistake in the definition, not a value this function should pass
 /// through.
-pub(crate) fn net_layout_to_chrono(layout: &str) -> Result<String, CardigannError> {
+///
+/// `pub` rather than `pub(crate)` only so `lib.rs` can re-export it
+/// (`#[doc(hidden)]`) for `tests/corpus.rs`'s translation gate — the
+/// `netlayout` module itself stays private, so this is unreachable from
+/// outside the crate except through that one re-export.
+pub fn net_layout_to_chrono(layout: &str) -> Result<String, CardigannError> {
     let mut out = String::with_capacity(layout.len());
     let mut rest = layout;
 
