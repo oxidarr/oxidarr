@@ -2,6 +2,7 @@
 //! enum by frequency of use.
 
 use crate::error::CardigannError;
+use crate::fuzzydate::parse_fuzzy;
 use crate::netlayout::net_layout_to_chrono;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use regex::Regex;
@@ -10,11 +11,11 @@ use regex::Regex;
 /// engine reads from its environment rather than from the row being
 /// processed — the wall clock (for `dateparse`/`timeparse`/`timeago`/
 /// `fuzzytime`) and the search's keywords (for `andmatch`'s row-inclusion
-/// check). `dateparse`/`timeparse` read `now` (see [`apply`]'s match arm);
-/// `timeago`/`fuzzytime`/`andmatch` do not yet — see the identity-pass-through
-/// comments on those filters' match arms — but the parameter exists now so
-/// later plans that implement them do not need to touch every call site
-/// again.
+/// check). `dateparse`/`timeparse`/`timeago`/`fuzzytime` all read `now`
+/// (see [`apply`]'s match arms); `andmatch` does not yet — see the
+/// identity-pass-through comment on its match arm — but the parameter
+/// exists now so the plan that implements it does not need to touch every
+/// call site again.
 #[derive(Debug, Clone)]
 pub struct FilterCtx {
     /// The moment a filter evaluation should treat as "now".
@@ -174,11 +175,12 @@ pub enum Filter {
     },
     /// Trims whitespace, or the given characters, from both ends.
     Trim(Option<String>),
-    /// Parses a relative "time ago" phrase. Deferred to the engine, which
-    /// owns the clock.
+    /// Parses a relative "time ago" phrase (`3 hours ago`) against the
+    /// clock in [`FilterCtx`]. Shares its parser with `FuzzyTime`.
     TimeAgo,
-    /// Parses a fuzzy/approximate time phrase. Deferred to the engine,
-    /// which owns the clock.
+    /// Parses a fuzzy/approximate time phrase (`yesterday`, `Today at
+    /// 10:32`, …) against the clock in [`FilterCtx`]. Shares its parser
+    /// with `TimeAgo`.
     FuzzyTime,
     /// Keeps only the whitelisted tokens the input has in common with a
     /// comma/space/punctuation-separated whitelist argument (case folded),
@@ -261,8 +263,9 @@ pub fn parse_filter(name: &str, args: &[String]) -> Result<Filter, CardigannErro
 ///
 /// `ctx` carries the clock and search keywords a real Cardigann engine
 /// consults outside the row itself; see [`FilterCtx`]. `dateparse`/
-/// `timeparse` read `ctx.now`; the filters that still need it (`timeago`,
-/// `fuzzytime`, `andmatch`) are, for now, identity pass-throughs.
+/// `timeparse`/`timeago`/`fuzzytime` all read `ctx.now`; `andmatch`, the
+/// one filter that still needs `ctx.keywords`, is for now an identity
+/// pass-through.
 ///
 /// # Errors
 ///
@@ -321,17 +324,23 @@ pub fn apply(
             parse_net_datetime(layout, input, ctx)
                 .map_or_else(|| input.to_string(), |dt| dt.to_rfc3339())
         }
-        // `timeago`/`fuzzytime` evaluation is deferred to a later plan
-        // (Tasks 4 and 6); `andmatch` cannot be implemented as a value
-        // transform at all (see the `AndMatch` doc comment) — today every
-        // one of the 59+ trackers in the corpus that use it accepts all
-        // rows regardless of query relevance, matching a currently-open
-        // upstream Prowlarr defect (Prowlarr/Prowlarr#1270) where its own
-        // `andmatch` case also parses arguments and then does nothing
-        // with them. All three are recognized (so a definition using them
-        // is not rejected as unknown) but not yet evaluated, and pass the
-        // input through unchanged.
-        Filter::TimeAgo | Filter::FuzzyTime | Filter::AndMatch => input.to_string(),
+        // `timeago`/`fuzzytime` share one fuzzy relative-date parser (see
+        // `fuzzydate::parse_fuzzy`): the input passes through unchanged
+        // when it matches none of the recognized shapes (Prowlarr
+        // tolerates junk rows; dropping them is not this filter's job).
+        Filter::TimeAgo | Filter::FuzzyTime => {
+            parse_fuzzy(input, ctx.now).map_or_else(|| input.to_string(), |dt| dt.to_rfc3339())
+        }
+        // `andmatch` cannot be implemented as a value transform at all
+        // (see the `AndMatch` doc comment) — today every one of the 59+
+        // trackers in the corpus that use it accepts all rows regardless
+        // of query relevance, matching a currently-open upstream Prowlarr
+        // defect (Prowlarr/Prowlarr#1270) where its own `andmatch` case
+        // also parses arguments and then does nothing with them. It is
+        // recognized (so a definition using it is not rejected as
+        // unknown) but not yet evaluated, and passes the input through
+        // unchanged. Deferred to Task 6.
+        Filter::AndMatch => input.to_string(),
     }))
 }
 
@@ -920,18 +929,76 @@ mod tests {
     }
 
     #[test]
-    fn timeago_fuzzytime_and_andmatch_pass_through_unchanged() {
-        // `timeago`/`fuzzytime` need a clock the engine does not own until
-        // a later plan (Tasks 4 and 6 respectively), and `andmatch` cannot
-        // be expressed by `apply`'s `&str -> String` signature at all (it
-        // is a row-inclusion filter, not a value transform). Pinning
-        // today's no-op behavior here means the day any of them gets a
-        // real implementation, this test fails and has to be updated as a
-        // deliberate, visible diff — not silently. `dateparse`/`timeparse`
-        // used to be pinned here too; they now have real tests below.
-        assert_eq!(run("timeago", &[], "3 hours ago"), "3 hours ago");
-        assert_eq!(run("fuzzytime", &[], "yesterday"), "yesterday");
+    fn andmatch_passes_through_unchanged() {
+        // `andmatch` cannot be expressed by `apply`'s `&str -> String`
+        // signature at all (it is a row-inclusion filter, not a value
+        // transform, and is deferred to Task 6). Pinning today's no-op
+        // behavior here means the day it gets a real implementation, this
+        // test fails and has to be updated as a deliberate, visible diff —
+        // not silently. `timeago`/`fuzzytime` used to be pinned here too;
+        // they now have real tests below.
         assert_eq!(run("andmatch", &[], "some row text"), "some row text");
+    }
+
+    #[test]
+    fn timeago_subtracts_from_now() {
+        let ctx = FilterCtx::fixed_for_tests();
+        assert_eq!(
+            run_ctx("timeago", &[], "3 hours ago", &ctx),
+            "2026-01-15T09:00:00+00:00"
+        );
+        assert_eq!(
+            run_ctx("timeago", &[], "1 day 2 hours ago", &ctx),
+            "2026-01-14T10:00:00+00:00"
+        );
+    }
+
+    #[test]
+    fn fuzzytime_handles_named_days() {
+        let ctx = FilterCtx::fixed_for_tests();
+        assert_eq!(
+            run_ctx("fuzzytime", &[], "yesterday 08:15", &ctx),
+            "2026-01-14T08:15:00+00:00"
+        );
+        assert_eq!(
+            run_ctx("fuzzytime", &[], "Today at 10:32", &ctx),
+            "2026-01-15T10:32:00+00:00"
+        );
+    }
+
+    #[test]
+    fn timeago_with_an_overflowing_count_passes_through_without_panicking() {
+        // Adversarial input: a count large enough to overflow chrono's
+        // TimeDelta bounds must be treated as junk (pass through
+        // unchanged), not panic the process.
+        let ctx = FilterCtx::fixed_for_tests();
+        assert_eq!(
+            run_ctx("timeago", &[], "999999999999 days ago", &ctx),
+            "999999999999 days ago"
+        );
+        assert_eq!(
+            run_ctx("timeago", &[], "9223372036854775807 months ago", &ctx),
+            "9223372036854775807 months ago"
+        );
+    }
+
+    #[test]
+    fn fuzzytime_resolves_a_trailing_offset_like_miobt_does() {
+        // Corpus shape (miobt.yml): after translating 今天/昨天 to
+        // Today/Yesterday, `append " +08:00"` runs immediately before
+        // `fuzzytime`, so the real input carries the tracker's fixed
+        // local offset as a trailing suffix.
+        let ctx = FilterCtx::fixed_for_tests();
+        assert_eq!(
+            run_ctx("fuzzytime", &[], "Today 00:35 +08:00", &ctx),
+            "2026-01-14T16:35:00+00:00"
+        );
+    }
+
+    #[test]
+    fn fuzzytime_passes_junk_through() {
+        let ctx = FilterCtx::fixed_for_tests();
+        assert_eq!(run_ctx("fuzzytime", &[], "soon™", &ctx), "soon™");
     }
 
     #[test]

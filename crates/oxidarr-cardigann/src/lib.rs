@@ -6,6 +6,7 @@
 pub mod engine;
 pub mod error;
 pub mod filters;
+mod fuzzydate;
 pub mod model;
 mod netlayout;
 pub mod selector;
