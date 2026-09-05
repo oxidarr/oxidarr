@@ -5,6 +5,7 @@
 
 pub mod client;
 pub mod error;
+pub mod query;
 pub mod reqwest_client;
 
 /// In-memory [`HttpClient`](client::HttpClient) test double, compiled into
@@ -14,4 +15,5 @@ pub mod testing;
 
 pub use client::{Body, HttpClient, HttpRequest, HttpResponse, Method};
 pub use error::{HttpError, IndexerError};
+pub use query::{SearchQuery, Settings, scope_for};
 pub use reqwest_client::ReqwestClient;
