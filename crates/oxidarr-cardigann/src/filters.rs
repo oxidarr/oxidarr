@@ -144,11 +144,11 @@ pub enum Filter {
     Append(String),
     /// Prepends a literal prefix to the input.
     Prepend(String),
-    /// Parses the input as a date using the given Go time layout. Deferred
-    /// to the engine, which owns the clock.
+    /// Parses the input as a date using the given .NET custom date-format
+    /// layout. Deferred to the engine, which owns the clock.
     DateParse(String),
-    /// Parses the input as a time-of-day using the given Go time layout.
-    /// Deferred to the engine, which owns the clock.
+    /// Parses the input as a time-of-day using the given .NET custom
+    /// date-format layout. Deferred to the engine, which owns the clock.
     TimeParse(String),
     /// Extracts the first capture group (or the whole match) of a regex.
     Regexp(Pattern),
@@ -841,10 +841,10 @@ mod tests {
         // implementation, this test fails and has to be updated as a
         // deliberate, visible diff — not silently.
         assert_eq!(
-            run("dateparse", &["Mon, 02 Jan 2006"], "irrelevant"),
+            run("dateparse", &["ddd, dd MMM yyyy"], "irrelevant"),
             "irrelevant"
         );
-        assert_eq!(run("timeparse", &["15:04:05"], "irrelevant"), "irrelevant");
+        assert_eq!(run("timeparse", &["HH:mm:ss"], "irrelevant"), "irrelevant");
         assert_eq!(run("timeago", &[], "3 hours ago"), "3 hours ago");
         assert_eq!(run("fuzzytime", &[], "yesterday"), "yesterday");
         assert_eq!(run("andmatch", &[], "some row text"), "some row text");
