@@ -2,7 +2,55 @@
 //! enum by frequency of use.
 
 use crate::error::CardigannError;
+use chrono::{DateTime, TimeZone, Utc};
 use regex::Regex;
+
+/// Context threaded through filter evaluation: the values a real Cardigann
+/// engine reads from its environment rather than from the row being
+/// processed — the wall clock (for `dateparse`/`timeparse`/`timeago`/
+/// `fuzzytime`) and the search's keywords (for `andmatch`'s row-inclusion
+/// check). Neither is read by [`apply`] yet — see the identity-pass-through
+/// comments on those filters' match arms — but the parameter exists now so
+/// later plans that implement them do not need to touch every call site
+/// again.
+#[derive(Debug, Clone)]
+pub struct FilterCtx {
+    /// The moment a filter evaluation should treat as "now".
+    pub now: DateTime<Utc>,
+    /// The search's keywords, in whatever order the search was issued with.
+    pub keywords: Vec<String>,
+}
+
+impl FilterCtx {
+    /// A fixed context for tests: `2026-01-15T12:00:00Z`, no keywords.
+    ///
+    /// Fixed rather than `Utc::now()` so tests of date/time filters (once
+    /// those filters are implemented) are deterministic instead of flaking
+    /// around midnight or across CI runs on different days.
+    #[must_use]
+    pub fn fixed_for_tests() -> Self {
+        let now = Utc
+            .with_ymd_and_hms(2026, 1, 15, 12, 0, 0)
+            .single()
+            .unwrap_or(DateTime::<Utc>::MIN_UTC);
+        Self {
+            now,
+            keywords: Vec::new(),
+        }
+    }
+}
+
+/// The result of applying a single filter to a value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterOutcome {
+    /// The filter produced a (possibly transformed) value.
+    Value(String),
+    /// The filter says to drop the row this value belongs to entirely.
+    /// Nothing emits this yet — `andmatch`, once implemented, will use it
+    /// for rows that fail to match every search keyword — but the engine's
+    /// filter-chain loop already treats it as "skip this row".
+    DropRow,
+}
 
 /// A parsed filter invocation.
 /// A compiled regex, backed by whichever engine can handle the pattern.
@@ -108,10 +156,11 @@ pub enum Filter {
     QueryString(String),
     /// A ROW-inclusion filter in real Cardigann: it keeps only result rows
     /// whose text contains every search keyword. That is not a value
-    /// transform (`&str -> String`), so `apply`'s current signature cannot
-    /// express it at all — implementing it for real requires changing
-    /// that signature, not filling in a match arm. See the comment on its
-    /// `apply` arm for the corpus impact of leaving it a no-op today.
+    /// transform (`&str -> String`), so implementing it for real means
+    /// returning [`FilterOutcome::DropRow`] from its `apply` arm, not just
+    /// filling one in with a value — `apply`'s signature already supports
+    /// that, but no arm produces it yet. See the comment on its `apply` arm
+    /// for the corpus impact of leaving it a no-op today.
     AndMatch,
     /// Splits the input on a separator and keeps one indexed part.
     Split {
@@ -208,14 +257,26 @@ pub fn parse_filter(name: &str, args: &[String]) -> Result<Filter, CardigannErro
 
 /// Applies a filter to a value.
 ///
+/// `ctx` carries the clock and search keywords a real Cardigann engine
+/// consults outside the row itself; see [`FilterCtx`]. It is not read by any
+/// match arm yet, since the filters that will need it (`dateparse`,
+/// `timeparse`, `timeago`, `fuzzytime`, `andmatch`) are still identity
+/// pass-throughs.
+///
 /// # Errors
 ///
 /// This implementation never fails at apply time — all argument validation
 /// happens in [`parse_filter`] — but the signature returns a `Result`
 /// because some filters (notably date/time parsing, once the engine grows
 /// a clock) may need to fail here in the future.
-pub fn apply(filter: &Filter, input: &str) -> Result<String, CardigannError> {
-    Ok(match filter {
+pub fn apply(
+    filter: &Filter,
+    input: &str,
+    ctx: &FilterCtx,
+) -> Result<FilterOutcome, CardigannError> {
+    // Not yet read by any arm below; see the doc comment above.
+    let _ = ctx;
+    Ok(FilterOutcome::Value(match filter {
         Filter::ReReplace {
             pattern,
             replacement,
@@ -266,7 +327,7 @@ pub fn apply(filter: &Filter, input: &str) -> Result<String, CardigannError> {
         // defect (Prowlarr/Prowlarr#1270) where its own `andmatch` case
         // also parses arguments and then does nothing with them.
         Filter::AndMatch => input.to_string(),
-    })
+    }))
 }
 
 fn query_param(input: &str, key: &str) -> String {
@@ -543,7 +604,20 @@ mod tests {
     fn run(name: &str, args: &[&str], input: &str) -> String {
         let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let f = parse_filter(name, &args).unwrap();
-        apply(&f, input).unwrap()
+        let ctx = FilterCtx::fixed_for_tests();
+        match apply(&f, input, &ctx).unwrap() {
+            FilterOutcome::Value(v) => v,
+            FilterOutcome::DropRow => {
+                unreachable!("no filter in this test suite emits DropRow")
+            }
+        }
+    }
+
+    #[test]
+    fn apply_takes_context_and_wraps_plain_values() {
+        let ctx = FilterCtx::fixed_for_tests();
+        let out = apply(&parse_filter("toupper", &[]).unwrap(), "abc", &ctx).unwrap();
+        assert_eq!(out, FilterOutcome::Value("ABC".into()));
     }
 
     #[test]

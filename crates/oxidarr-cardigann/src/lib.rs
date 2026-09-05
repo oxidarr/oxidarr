@@ -11,6 +11,7 @@ pub mod selector;
 pub mod template;
 
 pub use error::CardigannError;
+pub use filters::{FilterCtx, FilterOutcome};
 
 use crate::model::Definition;
 

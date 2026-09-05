@@ -670,6 +670,7 @@ fn json_response_definitions_are_rejected_not_silently_empty() {
             &def,
             r#"{"data":[{"name":"x"}]}"#,
             &std::collections::BTreeMap::new(),
+            &oxidarr_cardigann::FilterCtx::fixed_for_tests(),
         )
         .is_ok()
         {

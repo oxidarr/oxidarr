@@ -1,8 +1,9 @@
 //! Executes a definition's `search` block against a response body.
 
 use crate::error::CardigannError;
+use crate::filters::{self, FilterCtx, FilterOutcome};
 use crate::model::{Case, Definition, Field};
-use crate::{filters, selector, template};
+use crate::{selector, template};
 use oxidarr_core::Release;
 use scraper::{ElementRef, Html, Node};
 use std::collections::{BTreeMap, HashSet};
@@ -19,6 +20,10 @@ use std::collections::{BTreeMap, HashSet};
 /// HTML document, where its selectors would match nothing and produce an
 /// empty result indistinguishable from a genuinely empty search.
 ///
+/// A row whose filter chain yields [`FilterOutcome::DropRow`] for any field
+/// (nothing does yet — see [`FilterOutcome`]) is skipped entirely rather
+/// than emitted with a partial value.
+///
 /// # Errors
 ///
 /// Returns [`CardigannError`] if the definition declares a JSON response, or
@@ -29,6 +34,7 @@ pub fn extract(
     def: &Definition,
     body: &str,
     config: &BTreeMap<String, String>,
+    ctx: &FilterCtx,
 ) -> Result<Vec<Release>, CardigannError> {
     // Checked from the DECLARED response type, not inferred from selector
     // shape. 95 of the 101 JSON definitions use a bare-identifier row
@@ -49,7 +55,7 @@ pub fn extract(
     let mut out = Vec::new();
     let skip = def.search.rows.after.unwrap_or(0);
 
-    for row in rows_selector
+    'rows: for row in rows_selector
         .select(doc.root_element())
         .into_iter()
         .skip(skip)
@@ -61,7 +67,10 @@ pub fn extract(
 
         let mut values: BTreeMap<String, String> = BTreeMap::new();
         for (name, field) in &def.search.fields {
-            let raw = evaluate_field(field, row, &scope)?;
+            let raw = match evaluate_field(field, row, &scope, ctx)? {
+                FilterOutcome::Value(v) => v,
+                FilterOutcome::DropRow => continue 'rows,
+            };
             scope.set_result(name, &raw);
             values.insert(name.clone(), raw);
         }
@@ -93,11 +102,16 @@ pub fn extract(
 ///    produced.
 /// 6. `default:` — substituted only when the result, after filtering, is
 ///    still empty.
+///
+/// Returns [`FilterOutcome::DropRow`] when any filter in the chain says to
+/// drop the row this field belongs to; the caller must skip the whole row,
+/// not just this field, when that happens.
 fn evaluate_field(
     field: &Field,
     row: ElementRef<'_>,
     scope: &template::Scope,
-) -> Result<String, CardigannError> {
+    ctx: &FilterCtx,
+) -> Result<FilterOutcome, CardigannError> {
     let mut value = if let Some(case) = &field.case {
         case_value(case, row, scope)?
     } else if let Some(text) = &field.text {
@@ -110,7 +124,10 @@ fn evaluate_field(
 
     for spec in &field.filters {
         let filter = filters::parse_filter(&spec.name, &spec.args.to_vec())?;
-        value = filters::apply(&filter, &value)?;
+        match filters::apply(&filter, &value, ctx)? {
+            FilterOutcome::Value(v) => value = v,
+            FilterOutcome::DropRow => return Ok(FilterOutcome::DropRow),
+        }
     }
 
     if value.is_empty()
@@ -119,7 +136,7 @@ fn evaluate_field(
         value.clone_from(default);
     }
 
-    Ok(value)
+    Ok(FilterOutcome::Value(value))
 }
 
 /// Resolves a `case:` field: the mapped value of the first entry (in
@@ -375,7 +392,7 @@ search:
     fn releases() -> Vec<Release> {
         let def = parse_definition(DEF).unwrap();
         let html = include_str!("../tests/fixtures/simple_tracker.html");
-        extract(&def, html, &BTreeMap::new()).unwrap()
+        extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap()
     }
 
     #[test]
@@ -443,7 +460,8 @@ search:
 <tr class="result"><td class="name">B</td><td class="dl"></td></tr>
 </table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        let releases =
+            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
         assert!((releases[0].download_volume_factor - 0.0).abs() < f32::EPSILON);
         assert!((releases[1].download_volume_factor - 1.0).abs() < f32::EPSILON);
     }
@@ -472,7 +490,8 @@ search:
 <tr class="result"><td class="name">B</td><td class="dl"></td></tr>
 </table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        let releases =
+            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
         assert!((releases[0].download_volume_factor - 1.0).abs() < f32::EPSILON);
         assert!((releases[1].download_volume_factor - 1.0).abs() < f32::EPSILON);
     }
@@ -499,7 +518,8 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name">A</td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        let releases =
+            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
         assert_eq!(releases[0].genre.as_deref(), Some("Unknown"));
         assert_eq!(releases[0].description.as_deref(), Some("A"));
     }
@@ -521,7 +541,8 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name">Big Buck Bunny<span class="tag"> NEW</span></td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        let releases =
+            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
         assert_eq!(releases[0].title, "Big Buck Bunny");
     }
 
@@ -540,7 +561,8 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name">Big Buck<div><em><span class="tag"> NEW</span></em></div> Bunny</td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        let releases =
+            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
         assert_eq!(releases[0].title, "Big Buck Bunny");
     }
 
@@ -559,7 +581,8 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name"><span class="tag">[X]</span>Big<span class="tag">[Y]</span> Buck<span class="tag">[Z]</span> Bunny</td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        let releases =
+            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
         assert_eq!(releases[0].title, "Big Buck Bunny");
     }
 
@@ -599,7 +622,8 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name">A</td><td class="date">2024-01-01</td><td class="cat">2000</td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        let releases =
+            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
         assert_eq!(releases[0].title, "A");
         assert!(
             releases[0].publish_date.is_none(),
@@ -638,7 +662,8 @@ search:
             <tr class="result"><td class="fallback">OnlyFallback</td></tr>
         </table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        let releases =
+            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
         assert_eq!(releases[0].title, "Preferred");
         assert_eq!(releases[1].title, "OnlyFallback");
     }
@@ -666,7 +691,12 @@ search:
       selector: name
 ";
         let def = parse_definition(yaml).unwrap();
-        let message = match extract(&def, r#"{"data":[{"name":"A"}]}"#, &BTreeMap::new()) {
+        let message = match extract(
+            &def,
+            r#"{"data":[{"name":"A"}]}"#,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+        ) {
             Ok(releases) => format!("accepted, returning {} releases", releases.len()),
             Err(e) => e.to_string(),
         };
@@ -696,7 +726,7 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name">A</td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let err = extract(&def, html, &BTreeMap::new()).unwrap_err();
+        let err = extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap_err();
         let message = err.to_string();
         assert!(
             message.contains("$.torrents[0].id"),

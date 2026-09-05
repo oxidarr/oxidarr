@@ -348,6 +348,7 @@ version = "0.0.0"
 name = "oxidarr-cardigann"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "fancy-regex",
  "oxidarr-core",
  "regex",
