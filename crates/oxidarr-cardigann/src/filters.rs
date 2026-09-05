@@ -11,11 +11,7 @@ use regex::Regex;
 /// engine reads from its environment rather than from the row being
 /// processed — the wall clock (for `dateparse`/`timeparse`/`timeago`/
 /// `fuzzytime`) and the search's keywords (for `andmatch`'s row-inclusion
-/// check). `dateparse`/`timeparse`/`timeago`/`fuzzytime` all read `now`
-/// (see [`apply`]'s match arms); `andmatch` does not yet — see the
-/// identity-pass-through comment on its match arm — but the parameter
-/// exists now so the plan that implements it does not need to touch every
-/// call site again.
+/// check; see [`apply`]'s match arms).
 #[derive(Debug, Clone)]
 pub struct FilterCtx {
     /// The moment a filter evaluation should treat as "now".
@@ -49,9 +45,9 @@ pub enum FilterOutcome {
     /// The filter produced a (possibly transformed) value.
     Value(String),
     /// The filter says to drop the row this value belongs to entirely.
-    /// Nothing emits this yet — `andmatch`, once implemented, will use it
-    /// for rows that fail to match every search keyword — but the engine's
-    /// filter-chain loop already treats it as "skip this row".
+    /// `andmatch` is the only filter that emits this, for rows that fail to
+    /// match every search keyword; the engine's filter-chain loop treats it
+    /// as "skip this row".
     DropRow,
 }
 
@@ -157,14 +153,22 @@ pub enum Filter {
     Regexp(Pattern),
     /// Reads a single query-string parameter from a URL or query string.
     QueryString(String),
-    /// A ROW-inclusion filter in real Cardigann: it keeps only result rows
-    /// whose text contains every search keyword. That is not a value
-    /// transform (`&str -> String`), so implementing it for real means
-    /// returning [`FilterOutcome::DropRow`] from its `apply` arm, not just
-    /// filling one in with a value — `apply`'s signature already supports
-    /// that, but no arm produces it yet. See the comment on its `apply` arm
-    /// for the corpus impact of leaving it a no-op today.
-    AndMatch,
+    /// A ROW-inclusion filter: keeps only rows whose text contains every
+    /// one of the search's keywords ([`FilterCtx::keywords`]), case
+    /// insensitively; a row missing any keyword is dropped via
+    /// [`FilterOutcome::DropRow`], not just filtered to an empty value.
+    ///
+    /// The optional argument is Cardigann's `andmatch` character limit
+    /// (`args: 50` in `torrentlt.yml`, `deildu.yml`, `backups.yml`): per
+    /// Jackett's `TorznabQuery.MatchQueryStringAND` (the real engine behind
+    /// `CardigannIndexer.cs`'s `andmatch` case — Prowlarr copied the case
+    /// label but never wired the limit through, an open defect tracked as
+    /// Prowlarr/Prowlarr#1270), the limit truncates the search's keywords
+    /// (joined with a space) to their first N characters BEFORE splitting
+    /// back into words — it bounds *which* keywords must match, not *where*
+    /// in the row's text a keyword must appear. `None` when the argument is
+    /// absent or fails to parse as a non-negative integer.
+    AndMatch(Option<usize>),
     /// Splits the input on a separator and keeps one indexed part.
     Split {
         /// The separator to split on.
@@ -235,7 +239,7 @@ pub fn parse_filter(name: &str, args: &[String]) -> Result<Filter, CardigannErro
         "timeparse" => Filter::TimeParse(arg(0)),
         "regexp" => Filter::Regexp(compile(&arg(0))?),
         "querystring" => Filter::QueryString(arg(0)),
-        "andmatch" => Filter::AndMatch,
+        "andmatch" => Filter::AndMatch(args.first().and_then(|a| a.parse::<usize>().ok())),
         "split" => Filter::Split {
             sep: arg(0),
             index: arg(1).parse::<i64>().unwrap_or(0),
@@ -263,9 +267,10 @@ pub fn parse_filter(name: &str, args: &[String]) -> Result<Filter, CardigannErro
 ///
 /// `ctx` carries the clock and search keywords a real Cardigann engine
 /// consults outside the row itself; see [`FilterCtx`]. `dateparse`/
-/// `timeparse`/`timeago`/`fuzzytime` all read `ctx.now`; `andmatch`, the
-/// one filter that still needs `ctx.keywords`, is for now an identity
-/// pass-through.
+/// `timeparse`/`timeago`/`fuzzytime` all read `ctx.now`; `andmatch` reads
+/// `ctx.keywords` and, unlike every other filter here, may answer with
+/// [`FilterOutcome::DropRow`] instead of a transformed value — see
+/// [`and_match`].
 ///
 /// # Errors
 ///
@@ -280,6 +285,10 @@ pub fn apply(
     ctx: &FilterCtx,
 ) -> Result<FilterOutcome, CardigannError> {
     Ok(FilterOutcome::Value(match filter {
+        // Answers with `FilterOutcome::DropRow` rather than a value, so it
+        // returns out of this match (and this function) directly instead
+        // of falling through to the `Value(...)` wrapper below.
+        Filter::AndMatch(limit) => return Ok(and_match(input, ctx, *limit)),
         Filter::ReReplace {
             pattern,
             replacement,
@@ -331,17 +340,45 @@ pub fn apply(
         Filter::TimeAgo | Filter::FuzzyTime => {
             parse_fuzzy(input, ctx.now).map_or_else(|| input.to_string(), |dt| dt.to_rfc3339())
         }
-        // `andmatch` cannot be implemented as a value transform at all
-        // (see the `AndMatch` doc comment) — today every one of the 59+
-        // trackers in the corpus that use it accepts all rows regardless
-        // of query relevance, matching a currently-open upstream Prowlarr
-        // defect (Prowlarr/Prowlarr#1270) where its own `andmatch` case
-        // also parses arguments and then does nothing with them. It is
-        // recognized (so a definition using it is not rejected as
-        // unknown) but not yet evaluated, and passes the input through
-        // unchanged. Deferred to Task 6.
-        Filter::AndMatch => input.to_string(),
     }))
+}
+
+/// Implements Cardigann's `andmatch`: keeps the row only if every one of
+/// `ctx.keywords` appears case-insensitively somewhere in `input`; an empty
+/// keyword list (no active search, e.g. an RSS feed poll) always keeps the
+/// row, matching Prowlarr/Jackett's own `!searchCriteria.IsRssSearch` guard
+/// on the equivalent general-purpose filter.
+///
+/// `limit`, when present, truncates the keywords (joined with a single
+/// space, in `ctx.keywords`'s order) to their first `limit` characters
+/// before re-splitting them on non-word runs — see the `AndMatch` doc
+/// comment for why this mirrors Jackett's `MatchQueryStringAND` rather than
+/// bounding where in `input` a keyword must appear. A `limit` of `0`, or one
+/// that truncates away every keyword, leaves nothing left to require, so
+/// the row is kept — matching .NET LINQ's `Enumerable.All` returning `true`
+/// on an empty sequence.
+fn and_match(input: &str, ctx: &FilterCtx, limit: Option<usize>) -> FilterOutcome {
+    if ctx.keywords.is_empty() {
+        return FilterOutcome::Value(input.to_string());
+    }
+
+    let joined = ctx.keywords.join(" ");
+    let scope = match limit {
+        Some(n) => joined.chars().take(n).collect::<String>(),
+        None => joined,
+    };
+
+    let input_lower = input.to_lowercase();
+    let all_present = scope
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|part| !part.is_empty())
+        .all(|part| input_lower.contains(&part.to_lowercase()));
+
+    if all_present {
+        FilterOutcome::Value(input.to_string())
+    } else {
+        FilterOutcome::DropRow
+    }
 }
 
 /// Parses `input` against a .NET custom date-format `layout`
@@ -711,6 +748,12 @@ mod tests {
         }
     }
 
+    fn run_outcome(name: &str, args: &[&str], input: &str, ctx: &FilterCtx) -> FilterOutcome {
+        let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        let f = parse_filter(name, &args).unwrap();
+        apply(&f, input, ctx).unwrap()
+    }
+
     #[test]
     fn apply_takes_context_and_wraps_plain_values() {
         let ctx = FilterCtx::fixed_for_tests();
@@ -929,15 +972,64 @@ mod tests {
     }
 
     #[test]
-    fn andmatch_passes_through_unchanged() {
-        // `andmatch` cannot be expressed by `apply`'s `&str -> String`
-        // signature at all (it is a row-inclusion filter, not a value
-        // transform, and is deferred to Task 6). Pinning today's no-op
-        // behavior here means the day it gets a real implementation, this
-        // test fails and has to be updated as a deliberate, visible diff —
-        // not silently. `timeago`/`fuzzytime` used to be pinned here too;
-        // they now have real tests below.
-        assert_eq!(run("andmatch", &[], "some row text"), "some row text");
+    fn andmatch_drops_rows_missing_a_keyword() {
+        let mut ctx = FilterCtx::fixed_for_tests();
+        ctx.keywords = vec!["ubuntu".into(), "server".into()];
+        assert_eq!(
+            run_outcome("andmatch", &[], "Ubuntu 24.04 Desktop", &ctx),
+            FilterOutcome::DropRow
+        );
+        assert_eq!(
+            run_outcome("andmatch", &[], "Ubuntu 24.04 Server", &ctx),
+            FilterOutcome::Value("Ubuntu 24.04 Server".into())
+        );
+    }
+
+    #[test]
+    fn andmatch_with_no_keywords_keeps_everything() {
+        let ctx = FilterCtx::fixed_for_tests();
+        assert_eq!(
+            run_outcome("andmatch", &[], "anything", &ctx),
+            FilterOutcome::Value("anything".into())
+        );
+    }
+
+    #[test]
+    fn andmatch_matches_case_insensitively() {
+        let mut ctx = FilterCtx::fixed_for_tests();
+        ctx.keywords = vec!["UBUNTU".into()];
+        assert_eq!(
+            run_outcome("andmatch", &[], "ubuntu 24.04 server", &ctx),
+            FilterOutcome::Value("ubuntu 24.04 server".into())
+        );
+    }
+
+    #[test]
+    fn andmatch_character_limit_arg_bounds_which_keywords_must_match() {
+        // Mirrors Jackett's `TorznabQuery.MatchQueryStringAND(title, limit)`
+        // (the real engine behind Cardigann's `andmatch`, wired up through
+        // `query.ImdbID`-style guards in `CardigannIndexer.cs`): `limit`
+        // truncates the space-joined keyword string to its first N
+        // characters BEFORE splitting it back into words, so it bounds
+        // which keywords are required, not where in the input a keyword
+        // must appear. Here only "ubu" (the first 3 characters of "ubuntu
+        // server") is required, so a row missing "server" still matches.
+        let mut ctx = FilterCtx::fixed_for_tests();
+        ctx.keywords = vec!["ubuntu".into(), "server".into()];
+        assert_eq!(
+            run_outcome("andmatch", &["3"], "Ubuntu 24.04 Desktop", &ctx),
+            FilterOutcome::Value("Ubuntu 24.04 Desktop".into())
+        );
+    }
+
+    #[test]
+    fn andmatch_unparseable_arg_falls_back_to_no_limit() {
+        let mut ctx = FilterCtx::fixed_for_tests();
+        ctx.keywords = vec!["ubuntu".into(), "server".into()];
+        assert_eq!(
+            run_outcome("andmatch", &["not-a-number"], "Ubuntu 24.04 Desktop", &ctx),
+            FilterOutcome::DropRow
+        );
     }
 
     #[test]

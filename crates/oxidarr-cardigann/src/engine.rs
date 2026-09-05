@@ -22,8 +22,9 @@ use std::collections::{BTreeMap, HashSet};
 /// empty result indistinguishable from a genuinely empty search.
 ///
 /// A row whose filter chain yields [`FilterOutcome::DropRow`] for any field
-/// (nothing does yet — see [`FilterOutcome`]) is skipped entirely rather
-/// than emitted with a partial value.
+/// (`andmatch` does this for a row missing a search keyword — see
+/// [`FilterOutcome`]) is skipped entirely rather than emitted with a
+/// partial value.
 ///
 /// # Errors
 ///
@@ -704,6 +705,35 @@ search:
             extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
         assert_eq!(releases[0].title, "Preferred");
         assert_eq!(releases[1].title, "OnlyFallback");
+    }
+
+    #[test]
+    fn andmatch_drops_rows_that_fail_to_match_every_keyword() {
+        // End-to-end through the 'rows: loop: a field's filter chain
+        // producing `FilterOutcome::DropRow` must skip that row entirely,
+        // not just leave the field empty.
+        let yaml = r"
+id: simple
+name: Simple
+search:
+  rows:
+    selector: tr.result
+  fields:
+    title:
+      selector: td.name
+      filters:
+        - name: andmatch
+";
+        let html = r#"<table>
+<tr class="result"><td class="name">Ubuntu 24.04 Server</td></tr>
+<tr class="result"><td class="name">Ubuntu 24.04 Desktop</td></tr>
+</table>"#;
+        let def = parse_definition(yaml).unwrap();
+        let mut ctx = FilterCtx::fixed_for_tests();
+        ctx.keywords = vec!["ubuntu".into(), "server".into()];
+        let releases = extract(&def, html, &BTreeMap::new(), &ctx).unwrap();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].title, "Ubuntu 24.04 Server");
     }
 
     #[test]
