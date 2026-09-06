@@ -1,4 +1,4 @@
-//! End-to-end test for Task 17's `CardigannIndexer`: login, request
+//! End-to-end test for `CardigannIndexer`: login, request
 //! building, execution, and extraction composed behind the `Indexer`
 //! trait, against the fixture in `tests/fixtures/tracker_search.html` (a
 //! copy of `oxidarr-cardigann`'s `simple_tracker.html` extended with a
@@ -122,8 +122,8 @@ async fn searches_and_extracts_the_fixtures_releases_with_a_valid_session() {
 
 #[tokio::test]
 async fn a_valid_session_records_zero_login_requests() {
-    // Dedicated regression for the "no eager login" property (Fix round 1,
-    // Important finding): every `search()` call used to perform a full
+    // Dedicated regression for the "no eager login" property:
+    // every `search()` call used to perform a full
     // login round-trip first, unconditionally, with no session concept
     // gating it. Real private trackers rate-limit or flag accounts for
     // frequent re-auth, and a server built on this indexer calls `search`

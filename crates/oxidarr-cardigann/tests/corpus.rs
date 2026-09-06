@@ -224,12 +224,12 @@ fn every_selector_parses_as_standard_css() {
         for sel in selectors {
             total += 1;
             // Templated selectors cannot be parsed until they are rendered,
-            // and no template engine exists until Task 4. Expand every
-            // `{{ ... }}` construct into the set of residual selectors that
-            // could actually be rendered at runtime and require every one
-            // of them to compile — not just one branch of an `if`/`else`,
-            // since the branch never taken would otherwise never be
-            // checked at all.
+            // and this corpus check has no request/response context to
+            // render them against. Expand every `{{ ... }}` construct into
+            // the set of residual selectors that could actually be
+            // rendered at runtime and require every one of them to
+            // compile — not just one branch of an `if`/`else`, since the
+            // branch never taken would otherwise never be checked at all.
             if sel.contains("{{") {
                 let residuals = strip_template_spans(&sel);
                 if residuals
@@ -822,7 +822,7 @@ fn ends_in_date_filter(filters: &[serde_yaml_ng::Value]) -> bool {
 /// Counts definitions across the whole corpus whose `date` field's filter
 /// chain ends in an RFC 3339-emitting filter.
 ///
-/// Related to, but deliberately narrower than, the floor Task 3's
+/// Related to, but deliberately narrower than, the floor the
 /// `every_dateparse_timeparse_layout_translates` gate established (400+
 /// `dateparse`/`timeparse` layout arguments). That count spans every
 /// filter-invocation site in a definition (`dateheaders:`, arbitrary
@@ -835,8 +835,8 @@ fn ends_in_date_filter(filters: &[serde_yaml_ng::Value]) -> bool {
 /// RFC-3339-emitting filters. Measured directly against this corpus, that
 /// is 318, not 400+; 300 is used as a floor with headroom below the
 /// measured value, matching this file's convention elsewhere (e.g.
-/// `json_defs > 50` against a measured ~101) rather than restating Task
-/// 3's unrelated number.
+/// `json_defs > 50` against a measured ~101) rather than restating the
+/// other gate's unrelated number.
 #[test]
 fn corpus_has_many_definitions_whose_date_field_ends_in_a_date_filter() {
     let mut count = 0usize;
@@ -861,9 +861,9 @@ fn corpus_has_many_definitions_whose_date_field_ends_in_a_date_filter() {
 /// definitions, hand-picked to cover distinct `date`-filter shapes, and
 /// asserts `Release.publish_date` comes out populated.
 ///
-/// This is the actual non-vacuous, RESULT-level proof that the Task 3
-/// layout translator and this task's RFC 3339 wire-up cooperate end to end
-/// on real corpus definitions, not just the handwritten fixture in
+/// This is the actual non-vacuous, RESULT-level proof that the layout
+/// translator and RFC 3339 wire-up cooperate end to end on real corpus
+/// definitions, not just the handwritten fixture in
 /// `engine.rs`'s unit tests.
 ///
 /// A generic "for every one of the 400+ definitions counted above,

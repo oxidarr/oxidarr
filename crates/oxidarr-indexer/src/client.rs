@@ -2,7 +2,7 @@
 //!
 //! Indexer implementations execute requests through an `HttpClient` rather
 //! than talking to a transport directly, so the same indexer logic runs
-//! against a real client (Task 8) or the in-memory [`crate::testing::FakeClient`].
+//! against a real client or the in-memory [`crate::testing::FakeClient`].
 
 use std::borrow::Cow;
 use std::future::Future;

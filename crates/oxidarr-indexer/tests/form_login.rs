@@ -1,4 +1,4 @@
-//! Integration-style test for Task 14's form login flow, against the
+//! Integration-style test for the form login flow, against the
 //! hand-written fixture in `tests/fixtures/login_form.html` (a hidden CSRF
 //! input plus empty user/pass fields, `<form action="/take_login">`).
 #![allow(clippy::unwrap_used)]

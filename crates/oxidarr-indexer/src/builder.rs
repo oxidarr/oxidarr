@@ -27,7 +27,7 @@ use crate::query::{SearchQuery, Settings, scope_for};
 /// Every reachable path renders against the *same* [`Scope`], built once via
 /// [`scope_for`] — a path's `categories:` restriction does not narrow
 /// `.Categories` the way Jackett's per-path intersection does, since
-/// `scope_for`'s signature (fixed by Task 9) takes no path argument.
+/// `scope_for`'s signature takes no path argument.
 ///
 /// A path's own `inputs:` overlay `search.inputs` (path wins on key
 /// collision); the model has no `inheritinputs`-style opt-out field, so

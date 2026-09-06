@@ -75,7 +75,8 @@ impl Settings {
 /// `.Query.Keywords` as the raw (unsplit, unlowercased) query string,
 /// `.Query.Q` likewise, and `.Query.IMDBID`/`.Query.Season`/`.Query.Ep` from
 /// the matching `SearchQuery` field — each an empty string when its field is
-/// absent, per Plan 1's "unset variable renders empty" semantics.
+/// absent, matching the "unset variable renders empty" convention used
+/// throughout this crate's template scopes.
 ///
 /// `.Keywords`/`.Query.Keywords` are the raw query text, not
 /// [`SearchQuery::keywords`]'s lowercased/whitespace-split tokens.

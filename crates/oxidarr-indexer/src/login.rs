@@ -1094,7 +1094,7 @@ search:
 
     #[tokio::test]
     async fn cookie_login_without_a_configured_cookie_value_is_a_definition_error() {
-        // Fix round 1, Important finding 3: a `method: cookie` definition
+        // A `method: cookie` definition
         // whose user never configured the `cookie` setting used to
         // silently succeed (when `login.test` is absent) rather than
         // surfacing that the login can never actually work.
@@ -1878,9 +1878,8 @@ search:
 
     #[tokio::test]
     async fn unknown_login_method_is_a_definition_error_naming_the_method() {
-        // Fix round 1, Important finding 2: an arbitrary/typo'd
-        // `login.method` value had no dedicated test even though the
-        // `Some(other)` catch-all already produced the right error.
+        // An arbitrary/typo'd `login.method` value must produce a clear
+        // error naming the method, via the `Some(other)` catch-all.
         let def = parse(UNKNOWN_METHOD_LOGIN);
         let client = FakeClient::new();
 
@@ -1936,7 +1935,7 @@ search:
 
     #[tokio::test]
     async fn post_flow_check_error_rules_fires_regardless_of_http_status() {
-        // Fix round 1, cheap Minor: check_error_rules must fire on the
+        // check_error_rules must fire on the
         // response body content alone, not gated on a 2xx status — a
         // rejected login often comes back as a non-2xx status alongside
         // the same error markup.

@@ -1,8 +1,8 @@
 //! Composes login, request building, execution, and extraction into a
 //! single [`Indexer`] implementation for Cardigann-defined trackers.
 //!
-//! [`CardigannIndexer::search`] is the one place every other Task 7-16
-//! building block meets: [`build_search_requests`] renders the
+//! [`CardigannIndexer::search`] is the one place every other building
+//! block meets: [`build_search_requests`] renders the
 //! definition's `search` block into concrete requests, each is executed
 //! through the injected [`HttpClient`], [`check_error_rules`] inspects the
 //! response body against `search.error`, and a clean body is handed to
@@ -12,7 +12,7 @@
 //! tell an already-valid session apart from an expired one, and real
 //! private trackers rate-limit or flag accounts for frequent re-auth, so
 //! paying for a login round trip on every call would be actively harmful
-//! once a caller (Plan 3's search endpoint) calls `search` constantly.
+//! once a caller (e.g. an HTTP search endpoint) calls `search` constantly.
 //! Instead, [`authenticate`] runs reactively, only when a response actually
 //! trips `search.error` (see [`CardigannIndexer::execute_with_reauth`]) — a
 //! cold session's first search costs one wasted GET before that kicks in,

@@ -1,4 +1,4 @@
-//! Integration tests for Task 15's Newznab/Torznab feed parsing, against the
+//! Integration tests for Newznab/Torznab feed parsing, against the
 //! hand-written fixtures in `tests/fixtures/` (shared with `form_login.rs`).
 #![allow(clippy::unwrap_used, clippy::panic)]
 
