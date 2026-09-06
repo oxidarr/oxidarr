@@ -1,16 +1,18 @@
 //! Login flow orchestration, failure detection, and session verification.
 //!
 //! [`authenticate`] dispatches on a definition's `login.method` and drives
-//! the post/get/cookie flows on top of two independent checks: whether a
-//! login response indicates the credentials were rejected
+//! the post/get/cookie/form flows on top of two independent checks: whether
+//! a login response indicates the credentials were rejected
 //! ([`check_error_rules`]), and whether an existing session is still
 //! authenticated ([`verify_login`]). The scraped-hidden-input `form` flow
-//! (and the method-less `selectorinputs` style, e.g. `postman.yml`) is
-//! Task 14's seam — [`authenticate`] returns a placeholder
-//! [`LoginError::Definition`] for both until then.
+//! (and the method-less `selectorinputs` style, e.g. `postman.yml`, which
+//! shares the same machinery — see [`form_login`]'s doc comment) is
+//! implemented by [`form_login`].
 
+use chrono::Utc;
 use scraper::{ElementRef, Html};
 
+use oxidarr_cardigann::filters::{self, FilterCtx, FilterOutcome};
 use oxidarr_cardigann::model::{Definition, ErrorRule, Field, Login, LoginTest};
 use oxidarr_cardigann::selector::{self, CompiledSelector};
 use oxidarr_cardigann::template;
@@ -174,17 +176,20 @@ pub async fn verify_login<C: HttpClient>(
 ///   to be absent. When a `cookie` value is present, still runs
 ///   [`verify_login`] when `login.test` is set, exactly like the post/get
 ///   flows.
-/// - Anything else — `method: form`, or no `method` at all (the
-///   scraped-hidden-input `selectorinputs` style with no explicit `form:`,
-///   e.g. `postman.yml`) — is not yet implemented: returns
-///   [`LoginError::Definition`] naming the gap. Task 14 replaces both arms.
+/// - `method: form` — drives the scraped-hidden-input flow; see
+///   [`form_login`]'s doc comment for the full sequence.
+/// - No `method` at all — the scraped-hidden-input `selectorinputs` style
+///   with no explicit `form:` (e.g. `postman.yml`) — is routed through
+///   [`form_login`] as well: it shares every step of that flow (the default
+///   `form` selector, baseline-input collection, `selectorinputs`/`inputs`
+///   overlay, action resolution), so there is no distinct "methodless" flow
+///   to implement.
 ///   Note `login.cookies: Vec<String>` (e.g. `coastalcrew.yml`:
 ///   `cookies: ["JAVA=OK"]`) is an *unrelated* field — a list of literal
 ///   cookie strings to set on the client before requesting the login page
 ///   at all, always paired with `method: form` in the corpus, never a
-///   marker for the `cookie`-auth style above. Task 14's form flow is
-///   responsible for setting those cookies before its initial GET; nothing
-///   here reads `login.cookies`.
+///   marker for the `cookie`-auth style above. [`form_login`] is
+///   responsible for setting those cookies before its initial GET.
 ///
 /// # Errors
 /// Returns [`LoginError::NeedsCaptcha`], [`LoginError::Rejected`],
@@ -213,13 +218,8 @@ pub async fn authenticate<C: HttpClient>(
         Some(m) if m.eq_ignore_ascii_case("cookie") => {
             cookie_login(client, def, login, settings).await
         }
-        Some(m) if m.eq_ignore_ascii_case("form") => Err(LoginError::Definition(
-            "form login not yet implemented".to_string(),
-        )),
-        None => Err(LoginError::Definition(
-            "login block has no method (scraped selectorinputs login) is not yet implemented"
-                .to_string(),
-        )),
+        Some(m) if m.eq_ignore_ascii_case("form") => form_login(client, def, login, settings).await,
+        None => form_login(client, def, login, settings).await,
         Some(other) => Err(LoginError::Definition(format!(
             "login method {other:?} not yet implemented"
         ))),
@@ -344,6 +344,267 @@ async fn verify_test<C: HttpClient>(
     }
 }
 
+/// The scraped-hidden-input `form` login flow, and the method-less style
+/// that relies on the same machinery (e.g. `postman.yml`; see
+/// [`authenticate`]'s doc comment):
+///
+/// 1. GET `login.path` (resolved against `def.links`' first entry), with a
+///    `Cookie` header built from `login.cookies` when that list is
+///    non-empty (joined with `"; "`, matching Jackett's own
+///    `string.Join("; ", Login.Cookies)`). `login.cookies` is a list of
+///    *literal* cookie strings, unrelated to `method: cookie` auth — see
+///    [`authenticate`]'s doc comment.
+/// 2. Parse the response body and select the form via `login.form` (default
+///    `"form"`); no match is [`LoginError::Definition`] naming the selector.
+/// 3. Collect a baseline pair for every `input[name]` inside that form,
+///    value = its `value` attribute (default `""`), in document order.
+///    Unlike Jackett's `DoLogin`, this does not special-case disabled
+///    inputs or unchecked checkboxes/radios — not needed by any definition
+///    this task covers, and simpler to reason about.
+/// 4. Overlay `login.selectorinputs`: each key is an input name, each value
+///    a [`Field`] extracted against the *whole page* document (not just the
+///    form) via [`evaluate_login_field`].
+/// 5. Overlay rendered `login.inputs` (scope built the same way
+///    `submit_login` builds one, via `scope_for(def, &SearchQuery::default(),
+///    settings)`). When `login.selectors` is set, `login.inputs`' keys are
+///    CSS selectors resolved (via [`resolve_input_name`]) to the matched
+///    element's `name` attribute rather than being used as literal input
+///    names.
+///
+///    Steps 4 and 5 run in the reverse of Jackett's own order (Jackett
+///    overlays `Login.Inputs` before `Login.Selectorinputs`, so a scraped
+///    value would win a key collision there). This flow overlays
+///    `selectorinputs` first so rendered credentials always win a
+///    collision — the two key sets never overlap in the corpus
+///    (`selectorinputs` scrapes tokens, `inputs` renders credentials), so
+///    this is not a behavioural difference for any real definition, just a
+///    more defensive default.
+/// 6. POST the resulting pairs as a [`Body::Form`] to the form's `action`
+///    attribute (or `login.submitpath` when set) resolved against the
+///    login page's redirect-*final* URL — not the originally-requested
+///    login URL Jackett's C# literally resolves against
+///    (`resolvePath(submitUrlstr, new Uri(loginUrl))`). A relative form
+///    `action` is written by the page author relative to wherever the page
+///    actually ended up being served from, which is what ordinary browsers
+///    do too; this task's brief calls for that behaviour explicitly.
+///    `login.headers` is rendered and sent on this request (plus the same
+///    `Cookie` header as the GET, when `login.cookies` is set).
+/// 7. [`check_error_rules`] on the POST response, then [`verify_login`] when
+///    `login.test` is set — identical to `submit_login`'s tail.
+///
+/// # Errors
+/// Returns [`LoginError::Definition`] for a missing/malformed `login.path`,
+/// an unresolvable base link, a form/selector that fails to compile or
+/// match (naming it), an unknown filter in a `selectorinputs` field, or a
+/// `login.selectors` selector that matches no element / an element with no
+/// `name` attribute. Returns [`LoginError::Rejected`] or
+/// [`LoginError::Http`] from the same checks `submit_login` performs.
+async fn form_login<C: HttpClient>(
+    client: &C,
+    def: &Definition,
+    login: &Login,
+    settings: &Settings,
+) -> Result<(), LoginError> {
+    let path = login.path.as_deref().ok_or_else(|| {
+        LoginError::Definition(format!("login block for {} declares no path", def.id))
+    })?;
+    let base = base_url(def)?;
+    let scope = scope_for(def, &SearchQuery::default(), settings);
+
+    let rendered_path =
+        template::render(path, &scope).map_err(|err| LoginError::Definition(err.to_string()))?;
+    let login_url = base.join(&rendered_path).map_err(|err| {
+        LoginError::Definition(format!("invalid login path {rendered_path:?}: {err}"))
+    })?;
+
+    let cookie = login_cookie_header(login);
+    let get_req = HttpRequest {
+        method: Method::Get,
+        url: login_url,
+        headers: cookie.clone().into_iter().collect(),
+        body: None,
+    };
+    let landing = client.execute(get_req).await?;
+    let body = landing.text().into_owned();
+    let doc = Html::parse_document(&body);
+    let root = doc.root_element();
+
+    let form_selector_raw = login.form.as_deref().unwrap_or("form");
+    let form_selector = compile_html_selector(form_selector_raw)?;
+    let Some(form) = form_selector.select(root).into_iter().next() else {
+        return Err(LoginError::Definition(format!(
+            "no form found on the login page using form selector {form_selector_raw:?}"
+        )));
+    };
+
+    let input_selector = compile_html_selector("input[name]")?;
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for input in input_selector.select(form) {
+        let Some(name) = input.attr("name") else {
+            continue;
+        };
+        let value = input.attr("value").unwrap_or_default().to_string();
+        upsert(&mut pairs, name, value);
+    }
+
+    let field_ctx = FilterCtx {
+        now: Utc::now(),
+        keywords: Vec::new(),
+    };
+    for (name, field) in &login.selectorinputs {
+        let value = evaluate_login_field(name, field, root, &field_ctx)?;
+        upsert(&mut pairs, name, value);
+    }
+
+    for (key, template_str) in &login.inputs {
+        let rendered = template::render(template_str, &scope)
+            .map_err(|err| LoginError::Definition(err.to_string()))?;
+        let name = resolve_input_name(login, key, root)?;
+        upsert(&mut pairs, &name, rendered);
+    }
+
+    let action = form.attr("action").unwrap_or_default();
+    let submit_path = login.submitpath.as_deref().unwrap_or(action);
+    let submit_url = landing.final_url.join(submit_path).map_err(|err| {
+        LoginError::Definition(format!("invalid form submit path {submit_path:?}: {err}"))
+    })?;
+
+    let mut headers = rendered_headers(&login.headers, &scope)?;
+    headers.extend(cookie);
+
+    let post_req = HttpRequest {
+        method: Method::Post,
+        url: submit_url,
+        headers,
+        body: Some(Body::Form(pairs)),
+    };
+    let resp = client.execute(post_req).await?;
+    check_error_rules(&login.error, &resp.text())?;
+    verify_test(client, &base, login.test.as_ref()).await
+}
+
+/// Builds the `Cookie` header from `login.cookies`, when non-empty.
+fn login_cookie_header(login: &Login) -> Option<(String, String)> {
+    if login.cookies.is_empty() {
+        None
+    } else {
+        Some(("Cookie".to_string(), login.cookies.join("; ")))
+    }
+}
+
+/// Sets `name` to `value` in `pairs`, updating an existing entry in place
+/// (preserving its original position) rather than appending a duplicate.
+fn upsert(pairs: &mut Vec<(String, String)>, name: &str, value: String) {
+    if let Some(entry) = pairs.iter_mut().find(|(k, _)| k == name) {
+        entry.1 = value;
+    } else {
+        pairs.push((name.to_string(), value));
+    }
+}
+
+/// Resolves one `login.inputs` key into the input name to set: the key
+/// itself, or — when `login.selectors` is set — the `name` attribute of the
+/// element `key` (a CSS selector) matches against the whole page.
+fn resolve_input_name(
+    login: &Login,
+    key: &str,
+    root: ElementRef<'_>,
+) -> Result<String, LoginError> {
+    if !login.selectors {
+        return Ok(key.to_string());
+    }
+    let compiled = compile_html_selector(key)?;
+    let Some(el) = compiled.select(root).into_iter().next() else {
+        return Err(LoginError::Definition(format!(
+            "login.inputs selector {key:?} matched no element (login.selectors is set)"
+        )));
+    };
+    el.attr("name").map(str::to_string).ok_or_else(|| {
+        LoginError::Definition(format!("element selected by {key:?} has no name attribute"))
+    })
+}
+
+/// A minimal, login-scoped field extraction: `selector:` (+ optional
+/// `attribute:`, defaulting to the element's text) or a literal `text:`,
+/// then `filters:`, then `default:` when the result is still empty.
+///
+/// This is deliberately smaller than the search engine's field evaluation
+/// (`oxidarr_cardigann::engine`'s private `evaluate_field`, not part of that
+/// crate's public API): no `case:`/`remove:` support, and a `text:` is used
+/// literally rather than template-rendered. Login pages in the corpus only
+/// ever need selector+attribute (a CSRF token's `value`), so this covers
+/// the real shape without depending on engine internals.
+///
+/// `name` is `login.selectorinputs`' key for `field` — used only to name it
+/// in an error message, never as a selector or input name itself.
+///
+/// `ctx` is threaded in by the caller (rather than built here) so a single
+/// [`FilterCtx`] is shared across every `selectorinputs` field in one login
+/// (avoiding a redundant `Utc::now()` per field) and so tests can supply
+/// one directly — see [`FilterOutcome::DropRow`]'s handling below.
+///
+/// A filter chain that yields [`FilterOutcome::DropRow`] (only `andmatch`
+/// does this, and only when `ctx.keywords` is both non-empty and not fully
+/// contained in the value) is a [`LoginError::Definition`] naming the
+/// field: "drop this row" has no meaning outside search-result extraction,
+/// and `form_login` always calls this with an empty `ctx.keywords` (a login
+/// page has no search query), so `andmatch` can never actually produce
+/// `DropRow` through the real flow — this mapping exists purely so a filter
+/// chain that somehow does yield one fails loudly rather than silently
+/// emitting an empty value (which a caller could easily mistake for "the
+/// selector legitimately matched nothing").
+///
+/// # Errors
+/// Returns [`LoginError::Definition`] if `field.selector` fails to compile,
+/// if any of `field.filters` names a filter this engine does not implement
+/// or with unusable arguments, or if a filter yields
+/// [`FilterOutcome::DropRow`].
+fn evaluate_login_field(
+    name: &str,
+    field: &Field,
+    root: ElementRef<'_>,
+    ctx: &FilterCtx,
+) -> Result<String, LoginError> {
+    let mut value = if let Some(text) = &field.text {
+        text.clone()
+    } else if let Some(sel) = &field.selector {
+        let compiled = compile_html_selector(sel)?;
+        match compiled.select(root).into_iter().next() {
+            Some(el) => match &field.attribute {
+                Some(attr) => el.attr(attr).unwrap_or_default().to_string(),
+                None => el.text().collect::<String>(),
+            },
+            None => String::new(),
+        }
+    } else {
+        String::new()
+    };
+
+    for spec in &field.filters {
+        let filter = filters::parse_filter(&spec.name, &spec.args.to_vec())
+            .map_err(|err| LoginError::Definition(err.to_string()))?;
+        match filters::apply(&filter, &value, ctx)
+            .map_err(|err| LoginError::Definition(err.to_string()))?
+        {
+            FilterOutcome::Value(v) => value = v,
+            FilterOutcome::DropRow => {
+                return Err(LoginError::Definition(format!(
+                    "selectorinputs field {name:?}'s filter chain dropped it; \
+                     a login field cannot be dropped"
+                )));
+            }
+        }
+    }
+
+    if value.is_empty()
+        && let Some(default) = &field.default
+    {
+        value.clone_from(default);
+    }
+
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -356,8 +617,14 @@ mod tests {
     use crate::query::Settings;
     use crate::testing::{FakeClient, ok_html};
 
-    use super::{LoginError, authenticate, check_error_rules, verify_login};
-    use oxidarr_cardigann::model::{Definition, ErrorRule, Field, LoginTest, parse_definition};
+    use scraper::Html;
+
+    use super::{
+        FilterCtx, LoginError, authenticate, check_error_rules, evaluate_login_field, verify_login,
+    };
+    use oxidarr_cardigann::model::{
+        Definition, ErrorRule, Field, FilterArgs, FilterSpec, LoginTest, parse_definition,
+    };
 
     fn rule(selector: &str) -> ErrorRule {
         ErrorRule {
@@ -901,15 +1168,57 @@ search:
         assert!(matches!(err, LoginError::Rejected(msg) if msg == "login test failed"));
     }
 
-    const FORM_LOGIN: &str = r#"
+    const SIMPLE_FORM_PAGE: &str =
+        r#"<html><body><form action="/take_login"></form></body></html>"#;
+
+    const FORM_LOGIN_MINIMAL: &str = r"
 id: example
 name: Example
 links:
   - https://example.org/
 login:
-  path: haustuer.php
+  path: login.php
   method: form
-  form: form[action="haustuer.php"]
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+";
+
+    #[tokio::test]
+    async fn form_flow_posts_to_the_forms_action_with_no_inputs_declared() {
+        let def = parse(FORM_LOGIN_MINIMAL);
+        let client = FakeClient::new()
+            .expect(
+                |r| r.method == Method::Get && r.url.path() == "/login.php",
+                ok_html("https://example.org/login.php", SIMPLE_FORM_PAGE),
+            )
+            .expect(
+                |r| r.method == Method::Post && r.url.path() == "/take_login",
+                ok_html("https://example.org/take_login", "<html>ok</html>"),
+            );
+
+        authenticate(&client, &def, &Settings::default())
+            .await
+            .unwrap();
+
+        assert_eq!(client.requests().len(), 2);
+        assert_eq!(client.requests()[1].body, Some(Body::Form(vec![])));
+    }
+
+    const FORM_LOGIN_CUSTOM_SELECTOR: &str = r#"
+id: example
+name: Example
+links:
+  - https://example.org/
+login:
+  path: login.php
+  method: form
+  form: "form.login-form"
 search:
   paths:
     - path: browse
@@ -921,19 +1230,560 @@ search:
 "#;
 
     #[tokio::test]
-    async fn form_method_is_an_unimplemented_placeholder_for_task_14() {
-        let def = parse(FORM_LOGIN);
-        let client = FakeClient::new();
+    async fn form_flow_missing_form_selector_is_a_definition_error_naming_the_selector() {
+        let def = parse(FORM_LOGIN_CUSTOM_SELECTOR);
+        let client = FakeClient::new().expect(
+            |r| r.url.path() == "/login.php",
+            ok_html(
+                "https://example.org/login.php",
+                "<html><body><p>no form here</p></body></html>",
+            ),
+        );
 
         let err = authenticate(&client, &def, &Settings::default())
             .await
             .unwrap_err();
 
-        assert!(matches!(err, LoginError::Definition(msg) if msg.contains("form login")));
-        assert!(client.requests().is_empty());
+        assert!(matches!(err, LoginError::Definition(msg) if msg.contains("form.login-form")));
     }
 
-    const METHODLESS_LOGIN_NO_COOKIES: &str = r#"
+    const FORM_LOGIN_WITH_SELECTORINPUTS: &str = r#"
+id: example
+name: Example
+links:
+  - https://example.org/
+login:
+  path: login.php
+  method: form
+  selectorinputs:
+    csrf_token:
+      selector: meta[name="csrf"]
+      attribute: content
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+
+    const SELECTORINPUTS_PAGE: &str = r#"<html><head><meta name="csrf" content="server-token"></head><body>
+<form action="/take_login">
+<input type="text" name="username" value="">
+</form>
+</body></html>"#;
+
+    #[tokio::test]
+    async fn form_flow_overlays_selectorinputs_scraped_from_the_whole_page() {
+        // Extracted against the whole document, not just inside the form
+        // (mirrors Jackett's `landingResultDocument.FirstElementChild`) —
+        // `csrf_token` here isn't even a form input.
+        let def = parse(FORM_LOGIN_WITH_SELECTORINPUTS);
+        let client = FakeClient::new()
+            .expect(
+                |r| r.url.path() == "/login.php",
+                ok_html("https://example.org/login.php", SELECTORINPUTS_PAGE),
+            )
+            .expect(
+                |r| r.url.path() == "/take_login",
+                ok_html("https://example.org/take_login", "<html>ok</html>"),
+            );
+
+        authenticate(&client, &def, &Settings::default())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            client.requests()[1].body,
+            Some(Body::Form(vec![
+                ("username".to_string(), String::new()),
+                ("csrf_token".to_string(), "server-token".to_string()),
+            ]))
+        );
+    }
+
+    const FORM_LOGIN_WITH_UNKNOWN_FILTER: &str = r#"
+id: example
+name: Example
+links:
+  - https://example.org/
+login:
+  path: login.php
+  method: form
+  selectorinputs:
+    csrf_token:
+      selector: input[name="csrf_token"]
+      attribute: value
+      filters:
+        - name: not_a_real_filter
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+
+    const SELECTORINPUTS_FILTER_PAGE: &str = r#"<html><body>
+<form action="/take_login">
+<input type="hidden" name="csrf_token" value="  padded-token  ">
+</form>
+</body></html>"#;
+
+    #[tokio::test]
+    async fn form_flow_unknown_selectorinputs_filter_is_a_definition_error_naming_it_before_any_post()
+     {
+        // The flow must abort before the POST — no partial/garbage submit
+        // when a selectorinputs field can't even be evaluated.
+        let def = parse(FORM_LOGIN_WITH_UNKNOWN_FILTER);
+        let client = FakeClient::new().expect(
+            |r| r.url.path() == "/login.php",
+            ok_html("https://example.org/login.php", SELECTORINPUTS_FILTER_PAGE),
+        );
+
+        let err = authenticate(&client, &def, &Settings::default())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, LoginError::Definition(msg) if msg.contains("not_a_real_filter")));
+        assert_eq!(client.requests().len(), 1, "only the GET should have run");
+    }
+
+    const FORM_LOGIN_WITH_SELECTORINPUTS_FILTER: &str = r#"
+id: example
+name: Example
+links:
+  - https://example.org/
+login:
+  path: login.php
+  method: form
+  selectorinputs:
+    csrf_token:
+      selector: input[name="csrf_token"]
+      attribute: value
+      filters:
+        - name: trim
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+
+    #[tokio::test]
+    async fn form_flow_applies_selectorinputs_filters_to_the_scraped_value() {
+        let def = parse(FORM_LOGIN_WITH_SELECTORINPUTS_FILTER);
+        let client = FakeClient::new()
+            .expect(
+                |r| r.url.path() == "/login.php",
+                ok_html("https://example.org/login.php", SELECTORINPUTS_FILTER_PAGE),
+            )
+            .expect(
+                |r| r.url.path() == "/take_login",
+                ok_html("https://example.org/take_login", "<html>ok</html>"),
+            );
+
+        authenticate(&client, &def, &Settings::default())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            client.requests()[1].body,
+            Some(Body::Form(vec![(
+                "csrf_token".to_string(),
+                "padded-token".to_string()
+            )]))
+        );
+    }
+
+    #[test]
+    fn evaluate_login_field_maps_a_dropped_row_outcome_to_a_definition_error_naming_the_field() {
+        // A login field's filter chain yielding `DropRow` is nonsense (a
+        // login page has no "row" to drop) — pinned as a `Definition` error
+        // naming the field rather than silently becoming an empty value.
+        // `andmatch` is the only filter that can produce `DropRow`, and only
+        // when `ctx.keywords` is non-empty and not fully present in the
+        // value; `form_login` itself always builds a `FilterCtx` with empty
+        // keywords (a login page has no search query), so this can never
+        // actually fire through the real flow — this calls
+        // `evaluate_login_field` directly with a constructed `FilterCtx` to
+        // exercise the branch regardless.
+        let doc = Html::parse_document(r#"<html><body><div id="token">abc</div></body></html>"#);
+        let root = doc.root_element();
+        let field = Field {
+            selector: Some("#token".to_string()),
+            filters: vec![FilterSpec {
+                name: "andmatch".to_string(),
+                args: FilterArgs::None,
+            }],
+            ..Field::default()
+        };
+        let ctx = FilterCtx {
+            now: chrono::Utc::now(),
+            keywords: vec!["missing-keyword".to_string()],
+        };
+
+        let err = evaluate_login_field("token", &field, root, &ctx).unwrap_err();
+
+        assert!(matches!(err, LoginError::Definition(msg) if msg.contains("token")));
+    }
+
+    #[tokio::test]
+    async fn form_flow_missing_action_attribute_resolves_to_the_login_pages_final_url() {
+        // An absent `action` attribute (and, identically, an empty
+        // `action=""`) leaves nothing to resolve against the base but the
+        // empty string, which `Url::join` resolves back to the login page's
+        // own (already redirect-final) URL, per RFC 3986 5.3's empty
+        // relative-reference rule.
+        let def = parse(FORM_LOGIN_MINIMAL);
+        let client = FakeClient::new()
+            .expect(
+                |r| r.url.path() == "/login.php",
+                ok_html(
+                    "https://example.org/login.php",
+                    "<html><body><form></form></body></html>",
+                ),
+            )
+            .expect(
+                |r| r.method == Method::Post && r.url.path() == "/login.php",
+                ok_html("https://example.org/login.php", "<html>ok</html>"),
+            );
+
+        authenticate(&client, &def, &Settings::default())
+            .await
+            .unwrap();
+
+        assert_eq!(client.requests().len(), 2);
+        assert_eq!(
+            client.requests()[1].url.as_str(),
+            "https://example.org/login.php"
+        );
+    }
+
+    const FORM_LOGIN_ORDERING: &str = r#"
+id: example
+name: Example
+links:
+  - https://example.org/
+settings:
+  - name: override
+    type: text
+    label: Override
+login:
+  path: login.php
+  method: form
+  selectorinputs:
+    token:
+      selector: input[name="token"]
+      attribute: value
+  inputs:
+    token: "{{ .Config.override }}"
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+
+    const ORDERING_PAGE: &str = r#"<html><body>
+<form action="/take_login">
+<input type="hidden" name="token" value="baseline-value">
+</form>
+</body></html>"#;
+
+    #[tokio::test]
+    async fn form_flow_rendered_login_inputs_overlay_selectorinputs_on_key_collision() {
+        // Deliberately the reverse of Jackett's own overlay order — see
+        // `form_login`'s doc comment for why.
+        let def = parse(FORM_LOGIN_ORDERING);
+        let settings = settings_of(&[("override", "from-config")]);
+        let client = FakeClient::new()
+            .expect(
+                |r| r.url.path() == "/login.php",
+                ok_html("https://example.org/login.php", ORDERING_PAGE),
+            )
+            .expect(
+                |r| r.url.path() == "/take_login",
+                ok_html("https://example.org/take_login", "<html>ok</html>"),
+            );
+
+        authenticate(&client, &def, &settings).await.unwrap();
+
+        assert_eq!(
+            client.requests()[1].body,
+            Some(Body::Form(vec![(
+                "token".to_string(),
+                "from-config".to_string()
+            )]))
+        );
+    }
+
+    const FORM_LOGIN_SELECTORS_TRUE: &str = r#"
+id: example
+name: Example
+links:
+  - https://example.org/
+settings:
+  - name: username
+    type: text
+    label: Username
+login:
+  path: login.php
+  method: form
+  selectors: true
+  inputs:
+    "input.user-field": "{{ .Config.username }}"
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+
+    const SELECTORS_PAGE: &str = r#"<html><body>
+<form action="/take_login">
+<input type="text" class="user-field" name="uname" value="">
+</form>
+</body></html>"#;
+
+    #[tokio::test]
+    async fn form_flow_selectors_true_resolves_input_keys_via_css_selector_to_the_elements_name() {
+        let def = parse(FORM_LOGIN_SELECTORS_TRUE);
+        let settings = settings_of(&[("username", "alice")]);
+        let client = FakeClient::new()
+            .expect(
+                |r| r.url.path() == "/login.php",
+                ok_html("https://example.org/login.php", SELECTORS_PAGE),
+            )
+            .expect(
+                |r| r.url.path() == "/take_login",
+                ok_html("https://example.org/take_login", "<html>ok</html>"),
+            );
+
+        authenticate(&client, &def, &settings).await.unwrap();
+
+        assert_eq!(
+            client.requests()[1].body,
+            Some(Body::Form(vec![("uname".to_string(), "alice".to_string())]))
+        );
+    }
+
+    const FORM_LOGIN_SUBMITPATH: &str = r"
+id: example
+name: Example
+links:
+  - https://example.org/
+login:
+  path: login.php
+  method: form
+  submitpath: /custom_submit
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+";
+
+    #[tokio::test]
+    async fn form_flow_submitpath_overrides_the_forms_action() {
+        let def = parse(FORM_LOGIN_SUBMITPATH);
+        let client = FakeClient::new()
+            .expect(
+                |r| r.url.path() == "/login.php",
+                ok_html("https://example.org/login.php", SIMPLE_FORM_PAGE),
+            )
+            .expect(
+                |r| r.url.path() == "/custom_submit",
+                ok_html("https://example.org/custom_submit", "<html>ok</html>"),
+            );
+
+        authenticate(&client, &def, &Settings::default())
+            .await
+            .unwrap();
+
+        assert_eq!(client.requests()[1].url.path(), "/custom_submit");
+    }
+
+    const RELATIVE_ACTION_PAGE: &str =
+        r#"<html><body><form action="relative_submit"></form></body></html>"#;
+
+    #[tokio::test]
+    async fn form_flow_resolves_the_action_against_the_login_pages_final_url_after_redirects() {
+        // The GET response's `final_url` ("/sub/login.php") differs from the
+        // originally-requested "/login.php" — as it would after a redirect
+        // the transport already followed. A relative action must resolve
+        // against the FINAL url ("/sub/relative_submit"), not the original
+        // one ("/relative_submit") — see `form_login`'s doc comment for why
+        // this differs from Jackett's own literal resolution base.
+        let def = parse(FORM_LOGIN_MINIMAL);
+        let client = FakeClient::new()
+            .expect(
+                |r| r.url.path() == "/login.php",
+                ok_html("https://example.org/sub/login.php", RELATIVE_ACTION_PAGE),
+            )
+            .expect(
+                |r| r.url.path() == "/sub/relative_submit",
+                ok_html("https://example.org/sub/relative_submit", "<html>ok</html>"),
+            );
+
+        authenticate(&client, &def, &Settings::default())
+            .await
+            .unwrap();
+
+        assert_eq!(client.requests().len(), 2);
+    }
+
+    const FORM_LOGIN_WITH_COOKIES: &str = r#"
+id: example
+name: Example
+links:
+  - https://example.org/
+login:
+  path: login.php
+  method: form
+  cookies: ["JAVA=OK", "lang=en"]
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+
+    #[tokio::test]
+    async fn form_flow_sends_login_cookies_as_a_cookie_header_on_both_requests() {
+        let def = parse(FORM_LOGIN_WITH_COOKIES);
+        let expected_cookie = ("Cookie".to_string(), "JAVA=OK; lang=en".to_string());
+        let client = FakeClient::new()
+            .expect(
+                {
+                    let expected = expected_cookie.clone();
+                    move |r| r.url.path() == "/login.php" && r.headers.contains(&expected)
+                },
+                ok_html("https://example.org/login.php", SIMPLE_FORM_PAGE),
+            )
+            .expect(
+                move |r| r.url.path() == "/take_login" && r.headers.contains(&expected_cookie),
+                ok_html("https://example.org/take_login", "<html>ok</html>"),
+            );
+
+        authenticate(&client, &def, &Settings::default())
+            .await
+            .unwrap();
+
+        assert_eq!(client.requests().len(), 2);
+    }
+
+    const FORM_LOGIN_WITH_ERROR_RULE: &str = r"
+id: example
+name: Example
+links:
+  - https://example.org/
+login:
+  path: login.php
+  method: form
+  error:
+    - selector: div.error
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+";
+
+    #[tokio::test]
+    async fn form_flow_check_error_rules_rejects_a_failed_submit() {
+        let def = parse(FORM_LOGIN_WITH_ERROR_RULE);
+        let client = FakeClient::new()
+            .expect(
+                |r| r.url.path() == "/login.php",
+                ok_html("https://example.org/login.php", SIMPLE_FORM_PAGE),
+            )
+            .expect(
+                |r| r.url.path() == "/take_login",
+                ok_html(
+                    "https://example.org/take_login",
+                    r#"<html><body><div class="error">Bad credentials</div></body></html>"#,
+                ),
+            );
+
+        let err = authenticate(&client, &def, &Settings::default())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, LoginError::Rejected(msg) if msg == "Bad credentials"));
+    }
+
+    const FORM_LOGIN_WITH_TEST: &str = r#"
+id: example
+name: Example
+links:
+  - https://example.org/
+login:
+  path: login.php
+  method: form
+  test:
+    path: account
+    selector: a[href="/logout"]
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+
+    #[tokio::test]
+    async fn form_flow_runs_login_test_after_a_successful_submit() {
+        let def = parse(FORM_LOGIN_WITH_TEST);
+        let client = FakeClient::new()
+            .expect(
+                |r| r.url.path() == "/login.php",
+                ok_html("https://example.org/login.php", SIMPLE_FORM_PAGE),
+            )
+            .expect(
+                |r| r.url.path() == "/take_login",
+                ok_html("https://example.org/take_login", "<html>ok</html>"),
+            )
+            .expect(
+                |r| r.url.path() == "/account",
+                ok_html(
+                    "https://example.org/account",
+                    r#"<a href="/logout">Logout</a>"#,
+                ),
+            );
+
+        authenticate(&client, &def, &Settings::default())
+            .await
+            .unwrap();
+
+        assert_eq!(client.requests().len(), 3);
+    }
+
+    const METHODLESS_LOGIN: &str = r#"
 id: example
 name: Example
 links:
@@ -957,24 +1807,42 @@ search:
       selector: a
 "#;
 
+    const METHODLESS_PAGE: &str = r#"<html><body>
+<form action="take_login.php">
+<input type="hidden" name="formtoken" value="server-token">
+</form>
+</body></html>"#;
+
     #[tokio::test]
-    async fn methodless_login_without_cookies_is_an_unimplemented_placeholder() {
-        // e.g. postman.yml: no `method:` at all, relies on
-        // `selectorinputs` instead — Task 14's territory, not the
-        // `cookie`-injection style this task implements. `login.cookies`
-        // (a literal pre-request cookie list, unrelated to `method: cookie`
-        // auth) plays no part in this dispatch any more — see
-        // `unknown_login_method_is_a_definition_error_naming_the_method`
-        // and `authenticate`'s doc comment for why.
-        let def = parse(METHODLESS_LOGIN_NO_COOKIES);
-        let client = FakeClient::new();
+    async fn methodless_login_routes_through_the_same_form_flow() {
+        // e.g. postman.yml: no `method:` at all, relies on `selectorinputs`
+        // + `test` instead — routed through `form_login` since it shares
+        // every step (default `form` selector, baseline inputs,
+        // `selectorinputs` overlay, action resolution). See
+        // `authenticate`'s doc comment.
+        let def = parse(METHODLESS_LOGIN);
+        let client = FakeClient::new()
+            .expect(
+                |r| r.url.path() == "/index.php" && r.url.query() == Some("view=Main"),
+                ok_html("https://example.org/index.php?view=Main", METHODLESS_PAGE),
+            )
+            .expect(
+                |r| r.url.path() == "/take_login.php",
+                ok_html("https://example.org/take_login.php", "<html>ok</html>"),
+            )
+            .expect(
+                |r| r.method == Method::Get && r.url.path() == "/",
+                ok_html(
+                    "https://example.org/",
+                    r#"<a href="index.php?view=Login">Login</a>"#,
+                ),
+            );
 
-        let err = authenticate(&client, &def, &Settings::default())
+        authenticate(&client, &def, &Settings::default())
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(matches!(err, LoginError::Definition(_)));
-        assert!(client.requests().is_empty());
+        assert_eq!(client.requests().len(), 3);
     }
 
     const UNKNOWN_METHOD_LOGIN: &str = r"
