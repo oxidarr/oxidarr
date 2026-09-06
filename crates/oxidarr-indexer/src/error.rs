@@ -1,5 +1,7 @@
 //! Error types for the indexer HTTP layer.
 
+use crate::login::LoginError;
+
 /// Transport-level failure returned by an [`crate::client::HttpClient`]
 /// implementation.
 #[derive(Debug, thiserror::Error)]
@@ -40,4 +42,7 @@ pub enum IndexerError {
     /// The Cardigann engine failed to render or evaluate a definition.
     #[error(transparent)]
     Engine(#[from] oxidarr_cardigann::CardigannError),
+    /// Logging in, or verifying an existing session, failed.
+    #[error(transparent)]
+    Login(#[from] LoginError),
 }

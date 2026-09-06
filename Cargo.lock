@@ -851,6 +851,7 @@ dependencies = [
  "oxidarr-cardigann",
  "oxidarr-core",
  "reqwest",
+ "scraper",
  "thiserror",
  "tokio",
  "url",
