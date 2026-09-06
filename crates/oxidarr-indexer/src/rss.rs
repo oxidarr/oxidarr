@@ -253,46 +253,40 @@ pub fn parse_feed(xml: &[u8]) -> Result<Vec<Release>, IndexerError> {
                     apply_attr_element(&start, current.as_mut())?;
                 }
             }
-            Event::Text(text) => {
-                if field.is_some() && current.is_some() {
-                    let decoded = text
-                        .decode()
-                        .map_err(|err| IndexerError::Parse(format!("decoding text: {err}")))?;
-                    // Belt-and-braces, not load-bearing: quick-xml surfaces
-                    // every character/entity reference as its own
-                    // `Event::GeneralRef` (handled below), splitting the
-                    // surrounding text around it — so a well-formed
-                    // `Event::Text` run should never itself contain an
-                    // escape sequence for this call to resolve. Kept
-                    // rather than deleted so a `&name;`-shaped substring
-                    // that somehow *does* reach here (a reader
-                    // configuration or quick-xml edge case this module
-                    // hasn't hit) is still unescaped instead of silently
-                    // passed through raw.
-                    let unescaped = quick_xml::escape::unescape(&decoded)
-                        .map_err(|err| IndexerError::Parse(format!("unescaping text: {err}")))?;
-                    buffer.push_str(&unescaped);
-                }
+            Event::Text(text) if field.is_some() && current.is_some() => {
+                let decoded = text
+                    .decode()
+                    .map_err(|err| IndexerError::Parse(format!("decoding text: {err}")))?;
+                // Belt-and-braces, not load-bearing: quick-xml surfaces
+                // every character/entity reference as its own
+                // `Event::GeneralRef` (handled below), splitting the
+                // surrounding text around it — so a well-formed
+                // `Event::Text` run should never itself contain an
+                // escape sequence for this call to resolve. Kept
+                // rather than deleted so a `&name;`-shaped substring
+                // that somehow *does* reach here (a reader
+                // configuration or quick-xml edge case this module
+                // hasn't hit) is still unescaped instead of silently
+                // passed through raw.
+                let unescaped = quick_xml::escape::unescape(&decoded)
+                    .map_err(|err| IndexerError::Parse(format!("unescaping text: {err}")))?;
+                buffer.push_str(&unescaped);
             }
             // `<![CDATA[...]]>` sections are literal by definition — no
             // entity unescaping applies, unlike `Event::Text`.
-            Event::CData(cdata) => {
-                if field.is_some() && current.is_some() {
-                    let decoded = cdata
-                        .decode()
-                        .map_err(|err| IndexerError::Parse(format!("decoding CDATA: {err}")))?;
-                    buffer.push_str(&decoded);
-                }
+            Event::CData(cdata) if field.is_some() && current.is_some() => {
+                let decoded = cdata
+                    .decode()
+                    .map_err(|err| IndexerError::Parse(format!("decoding CDATA: {err}")))?;
+                buffer.push_str(&decoded);
             }
             // quick-xml surfaces a character or entity reference (`&amp;`,
             // `&#38;`, …) inside element text as its own event rather than
             // folding it into the surrounding `Event::Text` runs, so it
             // needs the same resolve-then-append treatment here.
-            Event::GeneralRef(entity_ref) => {
-                if field.is_some() && current.is_some() {
-                    let resolved = resolve_entity_ref(&entity_ref)?;
-                    buffer.push_str(&resolved);
-                }
+            Event::GeneralRef(entity_ref) if field.is_some() && current.is_some() => {
+                let resolved = resolve_entity_ref(&entity_ref)?;
+                buffer.push_str(&resolved);
             }
             Event::End(end) => {
                 if local_name_is(end.name(), b"item") {
