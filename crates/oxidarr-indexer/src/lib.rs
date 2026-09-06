@@ -4,6 +4,7 @@
 //! Owns request execution, rate limiting, and proxy support (SOCKS, HTTP, `FlareSolverr`).
 
 pub mod builder;
+pub mod cardigann;
 pub mod client;
 pub mod error;
 pub mod indexer;
@@ -18,6 +19,7 @@ pub mod rss;
 pub mod testing;
 
 pub use builder::build_search_requests;
+pub use cardigann::CardigannIndexer;
 pub use client::{Body, HttpClient, HttpRequest, HttpResponse, Method};
 pub use error::{HttpError, IndexerError};
 pub use indexer::{Indexer, NewznabIndexer, TorznabIndexer};

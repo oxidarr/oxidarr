@@ -426,48 +426,61 @@ async fn form_login<C: HttpClient>(
     };
     let landing = client.execute(get_req).await?;
     let body = landing.text().into_owned();
-    let doc = Html::parse_document(&body);
-    let root = doc.root_element();
 
-    let form_selector_raw = login.form.as_deref().unwrap_or("form");
-    let form_selector = compile_html_selector(form_selector_raw)?;
-    let Some(form) = form_selector.select(root).into_iter().next() else {
-        return Err(LoginError::Definition(format!(
-            "no form found on the login page using form selector {form_selector_raw:?}"
-        )));
-    };
+    // Everything `scraper`-typed (`Html`, `ElementRef`, compiled selectors)
+    // is confined to this block so it is dropped before the POST `.await`
+    // below. `ElementRef` borrows from a tree whose nodes hold `Cell`s, so
+    // it is `!Sync` and therefore `!Send`; left in scope across an await
+    // point it would make this whole async fn's future non-`Send` even
+    // though nothing here is actually used afterward — which matters
+    // because callers that must return a `Send` future (e.g.
+    // `CardigannIndexer::search`) call `authenticate` directly.
+    let (pairs, submit_url) = {
+        let doc = Html::parse_document(&body);
+        let root = doc.root_element();
 
-    let input_selector = compile_html_selector("input[name]")?;
-    let mut pairs: Vec<(String, String)> = Vec::new();
-    for input in input_selector.select(form) {
-        let Some(name) = input.attr("name") else {
-            continue;
+        let form_selector_raw = login.form.as_deref().unwrap_or("form");
+        let form_selector = compile_html_selector(form_selector_raw)?;
+        let Some(form) = form_selector.select(root).into_iter().next() else {
+            return Err(LoginError::Definition(format!(
+                "no form found on the login page using form selector {form_selector_raw:?}"
+            )));
         };
-        let value = input.attr("value").unwrap_or_default().to_string();
-        upsert(&mut pairs, name, value);
-    }
 
-    let field_ctx = FilterCtx {
-        now: Utc::now(),
-        keywords: Vec::new(),
+        let input_selector = compile_html_selector("input[name]")?;
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for input in input_selector.select(form) {
+            let Some(name) = input.attr("name") else {
+                continue;
+            };
+            let value = input.attr("value").unwrap_or_default().to_string();
+            upsert(&mut pairs, name, value);
+        }
+
+        let field_ctx = FilterCtx {
+            now: Utc::now(),
+            keywords: Vec::new(),
+        };
+        for (name, field) in &login.selectorinputs {
+            let value = evaluate_login_field(name, field, root, &field_ctx)?;
+            upsert(&mut pairs, name, value);
+        }
+
+        for (key, template_str) in &login.inputs {
+            let rendered = template::render(template_str, &scope)
+                .map_err(|err| LoginError::Definition(err.to_string()))?;
+            let name = resolve_input_name(login, key, root)?;
+            upsert(&mut pairs, &name, rendered);
+        }
+
+        let action = form.attr("action").unwrap_or_default();
+        let submit_path = login.submitpath.as_deref().unwrap_or(action);
+        let submit_url = landing.final_url.join(submit_path).map_err(|err| {
+            LoginError::Definition(format!("invalid form submit path {submit_path:?}: {err}"))
+        })?;
+
+        (pairs, submit_url)
     };
-    for (name, field) in &login.selectorinputs {
-        let value = evaluate_login_field(name, field, root, &field_ctx)?;
-        upsert(&mut pairs, name, value);
-    }
-
-    for (key, template_str) in &login.inputs {
-        let rendered = template::render(template_str, &scope)
-            .map_err(|err| LoginError::Definition(err.to_string()))?;
-        let name = resolve_input_name(login, key, root)?;
-        upsert(&mut pairs, &name, rendered);
-    }
-
-    let action = form.attr("action").unwrap_or_default();
-    let submit_path = login.submitpath.as_deref().unwrap_or(action);
-    let submit_url = landing.final_url.join(submit_path).map_err(|err| {
-        LoginError::Definition(format!("invalid form submit path {submit_path:?}: {err}"))
-    })?;
 
     let mut headers = rendered_headers(&login.headers, &scope)?;
     headers.extend(cookie);
