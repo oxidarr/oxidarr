@@ -1,17 +1,24 @@
-//! Login failure detection and session verification.
+//! Login flow orchestration, failure detection, and session verification.
 //!
-//! Two independent checks that Tasks 13-14 build the login flow on top of:
-//! whether a login response indicates the credentials were rejected
+//! [`authenticate`] dispatches on a definition's `login.method` and drives
+//! the post/get/cookie flows on top of two independent checks: whether a
+//! login response indicates the credentials were rejected
 //! ([`check_error_rules`]), and whether an existing session is still
-//! authenticated ([`verify_login`]).
+//! authenticated ([`verify_login`]). The scraped-hidden-input `form` flow
+//! (and the method-less `selectorinputs` style, e.g. `postman.yml`) is
+//! Task 14's seam — [`authenticate`] returns a placeholder
+//! [`LoginError::Definition`] for both until then.
 
 use scraper::{ElementRef, Html};
 
-use oxidarr_cardigann::model::{ErrorRule, Field, LoginTest};
+use oxidarr_cardigann::model::{Definition, ErrorRule, Field, Login, LoginTest};
 use oxidarr_cardigann::selector::{self, CompiledSelector};
+use oxidarr_cardigann::template;
 
-use crate::client::{HttpClient, HttpRequest, Method};
+use crate::builder::resolve_base_url;
+use crate::client::{Body, HttpClient, HttpRequest, Method};
 use crate::error::HttpError;
+use crate::query::{SearchQuery, Settings, scope_for};
 
 /// Failures from checking a login response or verifying a session.
 #[derive(Debug, thiserror::Error)]
@@ -47,11 +54,6 @@ pub enum LoginError {
 /// # Errors
 /// Returns [`LoginError::Definition`] if a rule's selector, or its
 /// message's selector, fails to compile.
-// Not yet called by anything in this crate: Tasks 13-14 wire this into the
-// login POST flow, checking a submitted login form's response against
-// `login.error`. `verify_login` below is a separate check (session/`login.test`)
-// with no need for it.
-#[allow(dead_code)]
 pub(crate) fn check_error_rules(rules: &[ErrorRule], body: &str) -> Result<(), LoginError> {
     let doc = Html::parse_document(body);
     let root = doc.root_element();
@@ -70,9 +72,6 @@ pub(crate) fn check_error_rules(rules: &[ErrorRule], body: &str) -> Result<(), L
 }
 
 /// Resolves an `ErrorRule`'s human-readable message for a matched element.
-// Only reachable from `check_error_rules`, which itself has no caller yet
-// (see its own `#[allow(dead_code)]`).
-#[allow(dead_code)]
 fn error_message(message: Option<&Field>, matched: ElementRef<'_>) -> Result<String, LoginError> {
     if let Some(field) = message {
         if let Some(text) = &field.text {
@@ -146,17 +145,219 @@ pub async fn verify_login<C: HttpClient>(
     Ok(!compiled.select(doc.root_element()).is_empty())
 }
 
+/// Authenticates against `def`'s `login` block, dispatching on
+/// `login.method` (case-insensitively, matching how `builder::build_request`
+/// reads `search.paths[].method`).
+///
+/// - No `login` block: `Ok(())`, no request issued at all.
+/// - `login.captcha` set: `Err(LoginError::NeedsCaptcha)`, checked before
+///   any request — this engine cannot solve captchas.
+/// - `method: post` / `method: get`: renders `login.inputs` and
+///   `login.headers` against a [`oxidarr_cardigann::template::Scope`] built
+///   the same way a search's would be
+///   (`scope_for(def, &SearchQuery::default(), s)`), submits them to
+///   `login.path` (resolved against `def.links`' first entry, the same
+///   convention `builder::build_search_requests` uses) — a form body for
+///   POST, query pairs for GET — then runs [`check_error_rules`] on the
+///   response body, then [`verify_login`] when `login.test` is set. A
+///   `login.test` that fails to verify is [`LoginError::Rejected`] with the
+///   message `"login test failed"`.
+/// - `method: cookie`: issues no request of its own. Cardigann's convention
+///   for this style is a user-supplied setting named `cookie`
+///   (`login.inputs.cookie: "{{ .Config.cookie }}"`, e.g. `teamos.yml`)
+///   whose value is injected into the transport at construction time (see
+///   [`crate::ReqwestClient::with_cookie`]), not something `authenticate`
+///   submits itself — but `authenticate` does require that setting be
+///   configured at all: an empty/absent `cookie` value is
+///   [`LoginError::Definition`], since a login that can never work
+///   shouldn't silently report success just because `login.test` happens
+///   to be absent. When a `cookie` value is present, still runs
+///   [`verify_login`] when `login.test` is set, exactly like the post/get
+///   flows.
+/// - Anything else — `method: form`, or no `method` at all (the
+///   scraped-hidden-input `selectorinputs` style with no explicit `form:`,
+///   e.g. `postman.yml`) — is not yet implemented: returns
+///   [`LoginError::Definition`] naming the gap. Task 14 replaces both arms.
+///   Note `login.cookies: Vec<String>` (e.g. `coastalcrew.yml`:
+///   `cookies: ["JAVA=OK"]`) is an *unrelated* field — a list of literal
+///   cookie strings to set on the client before requesting the login page
+///   at all, always paired with `method: form` in the corpus, never a
+///   marker for the `cookie`-auth style above. Task 14's form flow is
+///   responsible for setting those cookies before its initial GET; nothing
+///   here reads `login.cookies`.
+///
+/// # Errors
+/// Returns [`LoginError::NeedsCaptcha`], [`LoginError::Rejected`],
+/// [`LoginError::Http`], or [`LoginError::Definition`] (a missing/malformed
+/// `login.path`, an unresolvable base link, an unconfigured `cookie`
+/// setting, or an unimplemented method) — see [`LoginError`]'s variants.
+pub async fn authenticate<C: HttpClient>(
+    client: &C,
+    def: &Definition,
+    settings: &Settings,
+) -> Result<(), LoginError> {
+    let Some(login) = &def.login else {
+        return Ok(());
+    };
+    if login.captcha.is_some() {
+        return Err(LoginError::NeedsCaptcha);
+    }
+
+    match login.method.as_deref() {
+        Some(m) if m.eq_ignore_ascii_case("post") => {
+            submit_login(client, def, login, settings, Method::Post).await
+        }
+        Some(m) if m.eq_ignore_ascii_case("get") => {
+            submit_login(client, def, login, settings, Method::Get).await
+        }
+        Some(m) if m.eq_ignore_ascii_case("cookie") => {
+            cookie_login(client, def, login, settings).await
+        }
+        Some(m) if m.eq_ignore_ascii_case("form") => Err(LoginError::Definition(
+            "form login not yet implemented".to_string(),
+        )),
+        None => Err(LoginError::Definition(
+            "login block has no method (scraped selectorinputs login) is not yet implemented"
+                .to_string(),
+        )),
+        Some(other) => Err(LoginError::Definition(format!(
+            "login method {other:?} not yet implemented"
+        ))),
+    }
+}
+
+/// Resolves `def.links`' first entry into a base URL, wrapping
+/// [`resolve_base_url`]'s plain-string failure reason into a
+/// [`LoginError::Definition`] naming the definition.
+fn base_url(def: &Definition) -> Result<url::Url, LoginError> {
+    resolve_base_url(def)
+        .map_err(|reason| LoginError::Definition(format!("definition {}: {reason}", def.id)))
+}
+
+/// The `post`/`get` login flow: render `login.path`/`inputs`/`headers`,
+/// submit, check for rejection, then verify the session when `login.test`
+/// is set.
+async fn submit_login<C: HttpClient>(
+    client: &C,
+    def: &Definition,
+    login: &Login,
+    settings: &Settings,
+    method: Method,
+) -> Result<(), LoginError> {
+    let path = login.path.as_deref().ok_or_else(|| {
+        LoginError::Definition(format!("login block for {} declares no path", def.id))
+    })?;
+    let base = base_url(def)?;
+    let scope = scope_for(def, &SearchQuery::default(), settings);
+
+    let rendered_path =
+        template::render(path, &scope).map_err(|err| LoginError::Definition(err.to_string()))?;
+    let mut url = base.join(&rendered_path).map_err(|err| {
+        LoginError::Definition(format!("invalid login path {rendered_path:?}: {err}"))
+    })?;
+
+    let mut pairs = Vec::with_capacity(login.inputs.len());
+    for (key, template_str) in &login.inputs {
+        let rendered = template::render(template_str, &scope)
+            .map_err(|err| LoginError::Definition(err.to_string()))?;
+        pairs.push((key.clone(), rendered));
+    }
+
+    let headers = rendered_headers(&login.headers, &scope)?;
+
+    let body = match method {
+        Method::Post => Some(Body::Form(pairs)),
+        Method::Get => {
+            if !pairs.is_empty() {
+                url.query_pairs_mut()
+                    .extend_pairs(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+            }
+            None
+        }
+    };
+
+    let req = HttpRequest {
+        method,
+        url,
+        headers,
+        body,
+    };
+    let resp = client.execute(req).await?;
+    check_error_rules(&login.error, &resp.text())?;
+    verify_test(client, &base, login.test.as_ref()).await
+}
+
+/// Renders `login.headers`' first value per name against `scope` — the same
+/// "first value wins" convention `builder::build_request` applies to
+/// `search.headers`.
+fn rendered_headers(
+    headers: &std::collections::BTreeMap<String, Vec<String>>,
+    scope: &template::Scope,
+) -> Result<Vec<(String, String)>, LoginError> {
+    headers
+        .iter()
+        .filter_map(|(name, values)| values.first().map(|value| (name.clone(), value.clone())))
+        .map(|(name, template_str)| {
+            template::render(&template_str, scope)
+                .map(|rendered| (name, rendered))
+                .map_err(|err| LoginError::Definition(err.to_string()))
+        })
+        .collect()
+}
+
+/// The `cookie` login flow: no request of its own beyond confirming the
+/// user actually configured a `cookie` setting value — the cookie itself is
+/// injected into the transport elsewhere (see [`crate::ReqwestClient::with_cookie`]) —
+/// then `login.test` verification when present.
+async fn cookie_login<C: HttpClient>(
+    client: &C,
+    def: &Definition,
+    login: &Login,
+    settings: &Settings,
+) -> Result<(), LoginError> {
+    let resolved = settings.resolved(def);
+    let cookie = resolved.get("cookie").map_or("", String::as_str);
+    if cookie.trim().is_empty() {
+        return Err(LoginError::Definition(
+            "cookie login requires the 'cookie' setting".to_string(),
+        ));
+    }
+
+    let base = base_url(def)?;
+    verify_test(client, &base, login.test.as_ref()).await
+}
+
+/// Runs [`verify_login`] when `test` is set, turning a failed check into
+/// [`LoginError::Rejected`]; `Ok(())` when there is no test to run.
+async fn verify_test<C: HttpClient>(
+    client: &C,
+    base: &url::Url,
+    test: Option<&LoginTest>,
+) -> Result<(), LoginError> {
+    let Some(test) = test else {
+        return Ok(());
+    };
+    if verify_login(client, base, test).await? {
+        Ok(())
+    } else {
+        Err(LoginError::Rejected("login test failed".to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use std::collections::BTreeMap;
+
     use url::Url;
 
-    use crate::client::HttpResponse;
+    use crate::client::{Body, HttpResponse, Method};
+    use crate::query::Settings;
     use crate::testing::{FakeClient, ok_html};
 
-    use super::{LoginError, check_error_rules, verify_login};
-    use oxidarr_cardigann::model::{ErrorRule, Field, LoginTest};
+    use super::{LoginError, authenticate, check_error_rules, verify_login};
+    use oxidarr_cardigann::model::{Definition, ErrorRule, Field, LoginTest, parse_definition};
 
     fn rule(selector: &str) -> ErrorRule {
         ErrorRule {
@@ -315,6 +516,563 @@ mod tests {
         assert!(matches!(
             verify_login(&client, &base, &test).await,
             Err(LoginError::Http(_))
+        ));
+    }
+
+    fn parse(yaml: &str) -> Definition {
+        parse_definition(yaml).unwrap()
+    }
+
+    fn settings_of(pairs: &[(&str, &str)]) -> Settings {
+        let mut values = BTreeMap::new();
+        for (key, value) in pairs {
+            values.insert((*key).to_string(), (*value).to_string());
+        }
+        Settings::new(values)
+    }
+
+    const POST_LOGIN: &str = r#"
+id: example
+name: Example
+links:
+  - https://example.org/
+settings:
+  - name: username
+    type: text
+    label: Username
+  - name: password
+    type: password
+    label: Password
+login:
+  path: takelogin.php
+  method: post
+  inputs:
+    username: "{{ .Config.username }}"
+    password: "{{ .Config.password }}"
+  error:
+    - selector: div.error
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+
+    #[tokio::test]
+    async fn post_flow_sends_rendered_credentials_as_a_form_body() {
+        let def = parse(POST_LOGIN);
+        let settings = settings_of(&[("username", "alice"), ("password", "hunter2")]);
+        let client = FakeClient::new().expect(
+            |r| r.method == Method::Post && r.url.path() == "/takelogin.php",
+            ok_html("https://example.org/takelogin.php", "<html>ok</html>"),
+        );
+
+        authenticate(&client, &def, &settings).await.unwrap();
+
+        let requests = client.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].body,
+            Some(Body::Form(vec![
+                ("password".to_string(), "hunter2".to_string()),
+                ("username".to_string(), "alice".to_string()),
+            ]))
+        );
+    }
+
+    #[tokio::test]
+    async fn post_flow_wrong_password_fixture_rejects_with_the_fixtures_message() {
+        let def = parse(POST_LOGIN);
+        let settings = settings_of(&[("username", "alice"), ("password", "wrong")]);
+        let body =
+            r#"<html><body><div class="error">Invalid username or password</div></body></html>"#;
+        let client = FakeClient::new().expect(
+            |r| r.url.path() == "/takelogin.php",
+            ok_html("https://example.org/takelogin.php", body),
+        );
+
+        let err = authenticate(&client, &def, &settings).await.unwrap_err();
+
+        assert!(matches!(
+            err,
+            LoginError::Rejected(msg) if msg == "Invalid username or password"
+        ));
+    }
+
+    const GET_LOGIN: &str = r#"
+id: example
+name: Example
+links:
+  - https://example.org/
+settings:
+  - name: username
+    type: text
+    label: Username
+  - name: password
+    type: password
+    label: Password
+login:
+  path: takelogin.php
+  method: get
+  inputs:
+    username: "{{ .Config.username }}"
+    password: "{{ .Config.password }}"
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+
+    #[tokio::test]
+    async fn get_flow_puts_inputs_in_the_query() {
+        let def = parse(GET_LOGIN);
+        let settings = settings_of(&[("username", "alice"), ("password", "hunter2")]);
+        let client = FakeClient::new().expect(
+            |r| r.method == Method::Get && r.url.query() == Some("password=hunter2&username=alice"),
+            ok_html("https://example.org/takelogin.php", "<html></html>"),
+        );
+
+        authenticate(&client, &def, &settings).await.unwrap();
+
+        assert_eq!(client.requests()[0].body, None);
+    }
+
+    const CAPTCHA_LOGIN: &str = r"
+id: example
+name: Example
+links:
+  - https://example.org/
+login:
+  path: takelogin.php
+  method: post
+  captcha:
+    type: image
+    selector: img.captcha
+    input: captchaText
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+";
+
+    #[tokio::test]
+    async fn captcha_present_is_needs_captcha_before_any_request() {
+        let def = parse(CAPTCHA_LOGIN);
+        let client = FakeClient::new();
+
+        let err = authenticate(&client, &def, &Settings::default())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, LoginError::NeedsCaptcha));
+        assert!(client.requests().is_empty());
+    }
+
+    const NO_LOGIN: &str = r"
+id: example
+name: Example
+links:
+  - https://example.org/
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+";
+
+    #[tokio::test]
+    async fn no_login_block_is_ok_with_zero_requests() {
+        let def = parse(NO_LOGIN);
+        let client = FakeClient::new();
+
+        let result = authenticate(&client, &def, &Settings::default()).await;
+
+        assert!(result.is_ok());
+        assert!(client.requests().is_empty());
+    }
+
+    const MISSING_PATH_LOGIN: &str = r#"
+id: example
+name: Example
+links:
+  - https://example.org/
+login:
+  method: post
+  inputs:
+    username: "{{ .Config.username }}"
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+
+    #[tokio::test]
+    async fn missing_login_path_is_a_definition_error() {
+        let def = parse(MISSING_PATH_LOGIN);
+        let client = FakeClient::new();
+
+        let err = authenticate(&client, &def, &Settings::default())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, LoginError::Definition(_)));
+        assert!(client.requests().is_empty());
+    }
+
+    const COOKIE_LOGIN_WITH_TEST: &str = r#"
+id: example
+name: Example
+links:
+  - https://example.org/
+settings:
+  - name: cookie
+    type: text
+    label: Cookie
+login:
+  method: cookie
+  inputs:
+    cookie: "{{ .Config.cookie }}"
+  test:
+    path: /
+    selector: a[href="/account/"]
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+
+    #[tokio::test]
+    async fn cookie_flow_with_login_test_runs_verification() {
+        let def = parse(COOKIE_LOGIN_WITH_TEST);
+        let settings = settings_of(&[("cookie", "session=abc")]);
+        let client = FakeClient::new().expect(
+            |r| r.method == Method::Get && r.url.path() == "/",
+            ok_html("https://example.org/", r#"<a href="/account/">Account</a>"#),
+        );
+
+        authenticate(&client, &def, &settings).await.unwrap();
+
+        assert_eq!(client.requests().len(), 1);
+    }
+
+    const COOKIE_LOGIN_NO_TEST: &str = r#"
+id: example
+name: Example
+links:
+  - https://example.org/
+settings:
+  - name: cookie
+    type: text
+    label: Cookie
+login:
+  method: cookie
+  inputs:
+    cookie: "{{ .Config.cookie }}"
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+
+    #[tokio::test]
+    async fn cookie_flow_without_a_login_test_is_ok_with_zero_requests() {
+        let def = parse(COOKIE_LOGIN_NO_TEST);
+        let settings = settings_of(&[("cookie", "session=abc")]);
+        let client = FakeClient::new();
+
+        let result = authenticate(&client, &def, &settings).await;
+
+        assert!(result.is_ok());
+        assert!(client.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cookie_login_without_a_configured_cookie_value_is_a_definition_error() {
+        // Fix round 1, Important finding 3: a `method: cookie` definition
+        // whose user never configured the `cookie` setting used to
+        // silently succeed (when `login.test` is absent) rather than
+        // surfacing that the login can never actually work.
+        let def = parse(COOKIE_LOGIN_NO_TEST);
+        let client = FakeClient::new();
+
+        let err = authenticate(&client, &def, &Settings::default())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, LoginError::Definition(_)));
+        assert!(client.requests().is_empty());
+    }
+
+    const POST_LOGIN_WITH_TEST: &str = r#"
+id: example
+name: Example
+links:
+  - https://example.org/
+settings:
+  - name: username
+    type: text
+    label: Username
+  - name: password
+    type: password
+    label: Password
+login:
+  path: takelogin.php
+  method: post
+  inputs:
+    username: "{{ .Config.username }}"
+    password: "{{ .Config.password }}"
+  test:
+    path: account
+    selector: a[href="/logout"]
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+
+    #[tokio::test]
+    async fn post_flow_runs_login_test_after_a_successful_submit() {
+        let def = parse(POST_LOGIN_WITH_TEST);
+        let settings = settings_of(&[("username", "alice"), ("password", "hunter2")]);
+        let client = FakeClient::new()
+            .expect(
+                |r| r.url.path() == "/takelogin.php",
+                ok_html("https://example.org/takelogin.php", "<html></html>"),
+            )
+            .expect(
+                |r| r.url.path() == "/account",
+                ok_html(
+                    "https://example.org/account",
+                    r#"<a href="/logout">Logout</a>"#,
+                ),
+            );
+
+        authenticate(&client, &def, &settings).await.unwrap();
+
+        assert_eq!(client.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn post_flow_login_test_failure_is_rejected_with_a_dedicated_message() {
+        let def = parse(POST_LOGIN_WITH_TEST);
+        let settings = settings_of(&[("username", "alice"), ("password", "hunter2")]);
+        let client = FakeClient::new()
+            .expect(
+                |r| r.url.path() == "/takelogin.php",
+                ok_html("https://example.org/takelogin.php", "<html></html>"),
+            )
+            .expect(
+                |r| r.url.path() == "/account",
+                ok_html("https://example.org/account", "<p>please log in</p>"),
+            );
+
+        let err = authenticate(&client, &def, &settings).await.unwrap_err();
+
+        assert!(matches!(err, LoginError::Rejected(msg) if msg == "login test failed"));
+    }
+
+    const FORM_LOGIN: &str = r#"
+id: example
+name: Example
+links:
+  - https://example.org/
+login:
+  path: haustuer.php
+  method: form
+  form: form[action="haustuer.php"]
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+
+    #[tokio::test]
+    async fn form_method_is_an_unimplemented_placeholder_for_task_14() {
+        let def = parse(FORM_LOGIN);
+        let client = FakeClient::new();
+
+        let err = authenticate(&client, &def, &Settings::default())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, LoginError::Definition(msg) if msg.contains("form login")));
+        assert!(client.requests().is_empty());
+    }
+
+    const METHODLESS_LOGIN_NO_COOKIES: &str = r#"
+id: example
+name: Example
+links:
+  - https://example.org/
+login:
+  path: "index.php?view=Main"
+  selectorinputs:
+    formtoken:
+      selector: input[name="formtoken"]
+      attribute: value
+  test:
+    path: /
+    selector: a[href^="index.php?view=Login"]
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+
+    #[tokio::test]
+    async fn methodless_login_without_cookies_is_an_unimplemented_placeholder() {
+        // e.g. postman.yml: no `method:` at all, relies on
+        // `selectorinputs` instead — Task 14's territory, not the
+        // `cookie`-injection style this task implements. `login.cookies`
+        // (a literal pre-request cookie list, unrelated to `method: cookie`
+        // auth) plays no part in this dispatch any more — see
+        // `unknown_login_method_is_a_definition_error_naming_the_method`
+        // and `authenticate`'s doc comment for why.
+        let def = parse(METHODLESS_LOGIN_NO_COOKIES);
+        let client = FakeClient::new();
+
+        let err = authenticate(&client, &def, &Settings::default())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, LoginError::Definition(_)));
+        assert!(client.requests().is_empty());
+    }
+
+    const UNKNOWN_METHOD_LOGIN: &str = r"
+id: example
+name: Example
+links:
+  - https://example.org/
+login:
+  path: takelogin.php
+  method: telepathy
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+";
+
+    #[tokio::test]
+    async fn unknown_login_method_is_a_definition_error_naming_the_method() {
+        // Fix round 1, Important finding 2: an arbitrary/typo'd
+        // `login.method` value had no dedicated test even though the
+        // `Some(other)` catch-all already produced the right error.
+        let def = parse(UNKNOWN_METHOD_LOGIN);
+        let client = FakeClient::new();
+
+        let err = authenticate(&client, &def, &Settings::default())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, LoginError::Definition(msg) if msg.contains("telepathy")));
+        assert!(client.requests().is_empty());
+    }
+
+    const POST_LOGIN_UPPERCASE_METHOD: &str = r#"
+id: example
+name: Example
+links:
+  - https://example.org/
+settings:
+  - name: username
+    type: text
+    label: Username
+  - name: password
+    type: password
+    label: Password
+login:
+  path: takelogin.php
+  method: POST
+  inputs:
+    username: "{{ .Config.username }}"
+    password: "{{ .Config.password }}"
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+
+    #[tokio::test]
+    async fn login_method_matching_is_case_insensitive() {
+        let def = parse(POST_LOGIN_UPPERCASE_METHOD);
+        let settings = settings_of(&[("username", "alice"), ("password", "hunter2")]);
+        let client = FakeClient::new().expect(
+            |r| r.method == Method::Post && r.url.path() == "/takelogin.php",
+            ok_html("https://example.org/takelogin.php", "<html>ok</html>"),
+        );
+
+        authenticate(&client, &def, &settings).await.unwrap();
+
+        assert_eq!(client.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn post_flow_check_error_rules_fires_regardless_of_http_status() {
+        // Fix round 1, cheap Minor: check_error_rules must fire on the
+        // response body content alone, not gated on a 2xx status — a
+        // rejected login often comes back as a non-2xx status alongside
+        // the same error markup.
+        let def = parse(POST_LOGIN);
+        let settings = settings_of(&[("username", "alice"), ("password", "wrong")]);
+        let body =
+            r#"<html><body><div class="error">Invalid username or password</div></body></html>"#;
+        let client = FakeClient::new().expect(
+            |r| r.url.path() == "/takelogin.php",
+            status(403, "https://example.org/takelogin.php", body),
+        );
+
+        let err = authenticate(&client, &def, &settings).await.unwrap_err();
+
+        assert!(matches!(
+            err,
+            LoginError::Rejected(msg) if msg == "Invalid username or password"
         ));
     }
 }

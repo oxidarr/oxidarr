@@ -18,6 +18,6 @@ pub mod testing;
 pub use builder::build_search_requests;
 pub use client::{Body, HttpClient, HttpRequest, HttpResponse, Method};
 pub use error::{HttpError, IndexerError};
-pub use login::{LoginError, verify_login};
+pub use login::{LoginError, authenticate, verify_login};
 pub use query::{SearchQuery, Settings, scope_for};
 pub use reqwest_client::ReqwestClient;

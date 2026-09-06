@@ -2,7 +2,10 @@
 
 use std::fmt;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
+
+use reqwest::cookie::Jar;
 
 use crate::client::{Body, HttpClient, HttpRequest, HttpResponse, Method};
 use crate::error::HttpError;
@@ -26,6 +29,30 @@ impl ReqwestClient {
     pub fn new() -> Result<Self, HttpError> {
         let client = reqwest::Client::builder()
             .cookie_store(true)
+            .gzip(true)
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|err| HttpError::Transport(err.to_string()))?;
+        Ok(Self { client })
+    }
+
+    /// Builds a `ReqwestClient` pre-seeded with `cookie` for `base`, for a
+    /// definition's `method: cookie` login (e.g. `teamos.yml`:
+    /// `login.inputs.cookie: "{{ .Config.cookie }}"`, resolved from a
+    /// user-supplied `cookie` setting). `authenticate` itself issues no
+    /// request for this login style — the cookie has to be on the
+    /// transport *before* any search request goes out, which is why this is
+    /// a constructor rather than something `authenticate` calls.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HttpError::Transport`] if the underlying `reqwest` client
+    /// could not be constructed.
+    pub fn with_cookie(base: &url::Url, cookie: &str) -> Result<Self, HttpError> {
+        let jar = Jar::default();
+        jar.add_cookie_str(cookie, base);
+        let client = reqwest::Client::builder()
+            .cookie_provider(Arc::new(jar))
             .gzip(true)
             .timeout(Duration::from_secs(30))
             .build()
@@ -125,6 +152,12 @@ mod tests {
     #[test]
     fn new_builds_a_client_without_error() {
         ReqwestClient::new().unwrap();
+    }
+
+    #[test]
+    fn with_cookie_builds_a_client_without_error() {
+        let base: url::Url = "https://t.example/".parse().unwrap();
+        ReqwestClient::with_cookie(&base, "session=abc123").unwrap();
     }
 
     #[test]

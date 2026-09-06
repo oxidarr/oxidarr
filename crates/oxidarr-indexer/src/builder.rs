@@ -108,18 +108,26 @@ fn request_build_error(def: &Definition, reason: impl Into<String>) -> IndexerEr
     }
 }
 
-fn base_url(def: &Definition) -> Result<Url, IndexerError> {
+/// Resolves `def.links`' first entry into a base URL, normalised to end
+/// with `/` (matching Jackett). Returns the failure reason as a plain
+/// string rather than an [`IndexerError`] so [`crate::login::authenticate`]
+/// can reuse this same base-URL convention while wrapping the reason in its
+/// own [`crate::login::LoginError`].
+pub(crate) fn resolve_base_url(def: &Definition) -> Result<Url, String> {
     let link = def
         .links
         .first()
-        .ok_or_else(|| request_build_error(def, "definition declares no links"))?;
+        .ok_or_else(|| "definition declares no links".to_string())?;
     let normalised = if link.ends_with('/') {
         link.clone()
     } else {
         format!("{link}/")
     };
-    Url::parse(&normalised)
-        .map_err(|err| request_build_error(def, format!("invalid base link {link:?}: {err}")))
+    Url::parse(&normalised).map_err(|err| format!("invalid base link {link:?}: {err}"))
+}
+
+fn base_url(def: &Definition) -> Result<Url, IndexerError> {
+    resolve_base_url(def).map_err(|reason| request_build_error(def, reason))
 }
 
 /// Whether `path` should be included for a search with `q`'s categories.
