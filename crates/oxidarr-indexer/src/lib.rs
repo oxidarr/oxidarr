@@ -6,6 +6,7 @@
 pub mod builder;
 pub mod client;
 pub mod error;
+pub mod indexer;
 pub mod login;
 pub mod query;
 pub mod reqwest_client;
@@ -19,6 +20,7 @@ pub mod testing;
 pub use builder::build_search_requests;
 pub use client::{Body, HttpClient, HttpRequest, HttpResponse, Method};
 pub use error::{HttpError, IndexerError};
+pub use indexer::{Indexer, NewznabIndexer, TorznabIndexer};
 pub use login::{LoginError, authenticate, verify_login};
 pub use query::{SearchQuery, Settings, scope_for};
 pub use reqwest_client::ReqwestClient;
