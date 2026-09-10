@@ -953,3 +953,88 @@ fn representative_definitions_populate_publish_date_from_a_synthetic_row() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Every `categorymappings.cat` value across the corpus must resolve to a
+/// known Newznab category name, and `CategoryMap` must actually carry that
+/// resolution through end to end: for every row `{id, cat}`, `to_newznab(id)`
+/// must include the id `cat`'s name resolves to.
+///
+/// This is the completion gate for `catmap.rs`'s exact-name lookup: proof
+/// it covers every tracker in the wild, not just the hand-built sample in
+/// `catmap.rs`'s own unit tests. A manual survey of the corpus
+/// (`grep -rhoP '(?<=\{)id:[^}]*cat:\s*"?[^,"}]+' .definitions/v11/*.yml`,
+/// scoped to `categorymappings` flow-style entries specifically — a naive
+/// `grep cat:` also matches unrelated `cat:` keys such as language-code
+/// tables and `search.paths.inputs.cat` request parameters, which are out
+/// of scope for this gate) found exactly 69 distinct `cat` names across
+/// 18,262 raw text matches. This test itself walks 18,248 rows instead —
+/// the 14-row gap is entirely commented-out example entries (e.g.
+/// `animebybelka.yml` has eight, `animetosho-xyz.yml` two, `matrix.yml`
+/// two, `marinetracker.yml` one, all shaped like
+/// `#    - {id: 1, cat: TV/Anime, desc: "..."}`) that a raw `grep` still
+/// matches as text but [`oxidarr_cardigann::model::parse_definition`]
+/// correctly discards as YAML comments; confirmed directly via
+/// `grep -rn '^\s*#.*{id:.*cat:' .definitions/v11/*.yml | wc -l` → 14.
+/// Every one of the 18,248 real rows is a literal entry in
+/// [`oxidarr_cardigann::categories::all`]. So unlike
+/// `every_definition_fully_validates`'s `KNOWN_DIALECT_GAPS`, there is no
+/// genuine upstream typo here to carve out with an exemption list — this
+/// gate is expected to stay at zero failures.
+#[test]
+fn every_categorymapping_resolves_to_a_known_newznab_category() {
+    let mut failures = Vec::new();
+    let mut total = 0usize;
+
+    for path in definition_paths() {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(def) = oxidarr_cardigann::model::parse_definition(&raw) else {
+            continue;
+        };
+        if def.caps.categorymappings.is_empty() {
+            continue;
+        }
+        let map = oxidarr_cardigann::catmap::CategoryMap::from_definition(&def);
+        for mapping in &def.caps.categorymappings {
+            total += 1;
+            let Some(category) = oxidarr_cardigann::categories::all()
+                .iter()
+                .find(|c| c.name == mapping.cat)
+            else {
+                failures.push(format!(
+                    "{}: cat {:?} (tracker id {:?}) does not match any known Newznab category name",
+                    path.display(),
+                    mapping.cat,
+                    mapping.id
+                ));
+                continue;
+            };
+            if !map.to_newznab(&mapping.id).contains(&category.id) {
+                failures.push(format!(
+                    "{}: cat {:?} (tracker id {:?}) resolved to {} but CategoryMap did not carry it through",
+                    path.display(),
+                    mapping.cat,
+                    mapping.id,
+                    category.id
+                ));
+            }
+        }
+    }
+
+    assert!(
+        total > 15000,
+        "expected 15000+ categorymapping rows, found {total}"
+    );
+    assert!(
+        failures.is_empty(),
+        "{} of {total} categorymapping rows failed to resolve:\n{}",
+        failures.len(),
+        failures
+            .iter()
+            .take(15)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
