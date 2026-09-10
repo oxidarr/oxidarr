@@ -859,11 +859,17 @@ fn corpus_has_many_definitions_whose_date_field_ends_in_a_date_filter() {
 
 /// Drives a synthetic HTML row through the real engine for three corpus
 /// definitions, hand-picked to cover distinct `date`-filter shapes, and
-/// asserts `Release.publish_date` comes out populated.
+/// asserts `Release.publish_date` comes out populated. Also asserts
+/// `Release.categories` for the two of the three that declare
+/// `caps.categorymappings` (`torrentbyte.yml`, `fenyarnyek-tracker.yml`);
+/// `sexypics.yml` declares none, so its synthetic row's `category` value
+/// (`XXX`) has nothing to resolve against and must come out empty — the
+/// "unmapped contributes nothing" rule, proven here against a real corpus
+/// definition rather than only the handwritten fixtures in `engine.rs`.
 ///
 /// This is the actual non-vacuous, RESULT-level proof that the layout
-/// translator and RFC 3339 wire-up cooperate end to end on real corpus
-/// definitions, not just the handwritten fixture in
+/// translator and RFC 3339 wire-up (and, now, `CategoryMap`) cooperate end
+/// to end on real corpus definitions, not just the handwritten fixture in
 /// `engine.rs`'s unit tests.
 ///
 /// A generic "for every one of the 400+ definitions counted above,
@@ -902,7 +908,7 @@ fn representative_definitions_populate_publish_date_from_a_synthetic_row() {
             "fenyarnyek-tracker.yml",
             r#"<table class="lista"><tbody><tr>
                 <td><a href="index.php?page=torrent-details&amp;id=1">Title</a></td>
-                <td>cat</td>
+                <td><a href="index.php?category=13">cat</a></td>
                 <td>1.0 GB</td>
                 <td>09/03/2025</td>
                 <td><a href="download.php?id=1">DL</a></td>
@@ -948,6 +954,27 @@ fn representative_definitions_populate_publish_date_from_a_synthetic_row() {
         if releases[0].publish_date.is_none() {
             failures.push(format!(
                 "{file}: publish_date is None for a synthetic row that should have parsed"
+            ));
+        }
+
+        // Expected `Release.categories` per file: `torrentbyte.yml` and
+        // `fenyarnyek-tracker.yml` each declare `caps.categorymappings`
+        // that the synthetic row's `category` value resolves through;
+        // `sexypics.yml` declares none, so its category must resolve to
+        // nothing rather than being silently guessed.
+        let expected: &[u32] = match *file {
+            "torrentbyte.yml" => &[2000], // tracker id "Movies" -> bare Movies block
+            "fenyarnyek-tracker.yml" => &[2030], // tracker id "13" -> Movies/SD
+            "sexypics.yml" => &[],        // no categorymappings declared
+            other => {
+                failures.push(format!("{other}: add an expected-categories case for it"));
+                continue;
+            }
+        };
+        if releases[0].categories != expected {
+            failures.push(format!(
+                "{file}: expected categories {expected:?}, got {:?}",
+                releases[0].categories
             ));
         }
     }
