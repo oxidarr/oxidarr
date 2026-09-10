@@ -10,11 +10,13 @@ pub mod application;
 pub mod config;
 pub mod error;
 pub mod indexer;
+pub mod mapping;
 
 pub use application::{AppKind, ApplicationRepo, ApplicationRow, NewApplication, SyncLevel};
 pub use config::ConfigRepo;
 pub use error::DbError;
 pub use indexer::{IndexerKind, IndexerRepo, IndexerRow, NewIndexer};
+pub use mapping::{MappingRepo, MappingRow};
 
 use sqlx::SqlitePool;
 use sqlx::migrate::Migrator;
