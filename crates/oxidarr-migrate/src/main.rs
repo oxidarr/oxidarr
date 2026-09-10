@@ -59,14 +59,19 @@ async fn applied_versions(pool: &SqlitePool) -> Result<BTreeSet<i64>, sqlx::Erro
 }
 
 /// Reads the applied-migration snapshot without running any migrations and
-/// without creating the database file if it is absent.
+/// without creating the database file if it is absent. The connection is
+/// opened read-only, so the main database file cannot be modified. `SQLite`
+/// still creates/touches `-wal`/`-shm` sidecar files for any connection to
+/// a WAL-mode database, read-only included; the database contents are
+/// untouched either way.
 async fn snapshot_applied(path: &Path) -> Result<BTreeSet<i64>, sqlx::Error> {
     if !path.exists() {
         return Ok(BTreeSet::new());
     }
     let options = SqliteConnectOptions::new()
         .filename(path)
-        .create_if_missing(false);
+        .create_if_missing(false)
+        .read_only(true);
     let pool = SqlitePoolOptions::new().connect_with(options).await?;
     let versions = applied_versions(&pool).await;
     pool.close().await;
@@ -116,7 +121,11 @@ async fn migrate(path: &Path) -> i32 {
 
 /// Reports applied/pending status for every embedded migration without
 /// opening a migrating connection, so a missing database file is left
-/// untouched and every migration reports as pending.
+/// untouched and every migration reports as pending. The connection used to
+/// inspect an existing database is read-only, so `--status` never applies
+/// migrations and never modifies the database contents (WAL `-wal`/`-shm`
+/// sidecar files may still be created by `SQLite` for any WAL-mode
+/// connection, read-only included).
 async fn report_status(path: &Path) -> i32 {
     let applied = match snapshot_applied(path).await {
         Ok(versions) => versions,

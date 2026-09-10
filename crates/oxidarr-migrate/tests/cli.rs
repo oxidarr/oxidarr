@@ -43,7 +43,7 @@ fn status_on_missing_db_reports_pending_and_touches_nothing() {
 }
 
 #[test]
-fn status_after_migrate_reports_applied() {
+fn status_after_migrate_reports_applied_and_does_not_mutate_the_database() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("x.db");
     let bin = env!("CARGO_BIN_EXE_oxidarr-migrate");
@@ -53,12 +53,28 @@ fn status_after_migrate_reports_applied() {
         .unwrap();
     assert!(migrate_out.status.success());
 
+    // `migrate` leaves the WAL file uncheckpointed (the process exits via
+    // `std::process::exit`, so the connection pool never closes cleanly),
+    // so the `-wal`/`-shm` sidecars already exist by the time `--status`
+    // runs. That makes "no new sidecar files appear" true trivially and not
+    // a useful signal here; SQLite also touches those sidecars for *any*
+    // connection to a WAL-mode database, read-only or not, since a reader
+    // still needs the shared-memory index to see a consistent snapshot. So
+    // the meaningful, non-flaky assertion for "`--status` is strictly
+    // read-only" is that the main database file's bytes are unchanged by
+    // `--status` — the sidecars are allowed to exist, but no committed data
+    // may move as a result of running status.
+    let before = std::fs::read(&db).unwrap();
+
     let status_out = std::process::Command::new(bin)
         .args(["--db", db.to_str().unwrap(), "--status"])
         .output()
         .unwrap();
     assert!(status_out.status.success());
     assert!(String::from_utf8_lossy(&status_out.stdout).contains("applied 0001"));
+
+    let after = std::fs::read(&db).unwrap();
+    assert_eq!(before, after, "--status must not mutate the database file");
 }
 
 #[test]

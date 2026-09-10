@@ -14,8 +14,10 @@
 //!   `TEXT` column and [`IndexerKind`] mapped to the lowercase strings the
 //!   column's `CHECK` constraint allows.
 //! - [`ApplicationRepo`] — the `applications` table: insert/get/list/
-//!   update/delete over [`ApplicationRow`], with [`AppKind`] and
-//!   [`SyncLevel`] mapped the same way.
+//!   update/delete over [`ApplicationRow`], with [`AppKind`] mapped to the
+//!   lowercase strings its `CHECK` constraint allows and [`SyncLevel`]
+//!   mapped to the camelCase strings (`addOnly`, `fullSync`, ...) its own
+//!   `CHECK` constraint allows.
 //! - [`MappingRepo`] — the `app_indexer_map` table linking an application to
 //!   an indexer and the id the indexer is known by inside that application;
 //!   `set` upserts, and `delete` is idempotent since sync reconciliation
