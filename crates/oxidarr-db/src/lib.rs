@@ -6,8 +6,10 @@
 //! partially-migrated schema. Repository types built on top of [`Db`] land
 //! in later work; this crate currently only owns the pool and the schema.
 
+pub mod config;
 pub mod error;
 
+pub use config::ConfigRepo;
 pub use error::DbError;
 
 use sqlx::SqlitePool;
