@@ -8,9 +8,11 @@
 
 pub mod config;
 pub mod error;
+pub mod indexer;
 
 pub use config::ConfigRepo;
 pub use error::DbError;
+pub use indexer::{IndexerKind, IndexerRepo, IndexerRow, NewIndexer};
 
 use sqlx::SqlitePool;
 use sqlx::migrate::Migrator;
