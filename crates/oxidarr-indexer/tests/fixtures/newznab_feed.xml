@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/">
+  <channel>
+    <title>Example Newznab Indexer</title>
+    <item>
+      <title>Some.Movie.2026.1080p.BluRay</title>
+      <guid isPermaLink="true">https://example.org/details/nzb-1</guid>
+      <link>https://example.org/download/nzb-1.nzb</link>
+      <pubDate>Tue, 08 Sep 2026 08:00:00 +0000</pubDate>
+      <size>987654321</size>
+      <enclosure url="https://example.org/download/nzb-1.nzb" length="111111" type="application/x-nzb" />
+      <newznab:attr name="seeders" value="0" />
+      <newznab:attr name="peers" value="0" />
+      <newznab:attr name="grabs" value="15" />
+      <newznab:attr name="category" value="2040" />
+      <newznab:attr name="imdbid" value="1234567" />
+      <newznab:attr name="downloadvolumefactor" value="0.5" />
+      <newznab:attr name="uploadvolumefactor" value="3" />
+    </item>
+  </channel>
+</rss>

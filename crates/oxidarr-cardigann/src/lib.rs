@@ -6,11 +6,21 @@
 pub mod engine;
 pub mod error;
 pub mod filters;
+mod fuzzydate;
 pub mod model;
+mod netlayout;
 pub mod selector;
 pub mod template;
 
 pub use error::CardigannError;
+pub use filters::{FilterCtx, FilterOutcome};
+
+/// Re-exported solely so `tests/corpus.rs` — a separate crate, and so
+/// unable to reach a `pub(crate)` item — can assert every corpus
+/// `dateparse`/`timeparse` layout translates. `#[doc(hidden)]` because
+/// this is not part of the public API; use [`filters::apply`] instead.
+#[doc(hidden)]
+pub use netlayout::net_layout_to_chrono;
 
 use crate::model::Definition;
 

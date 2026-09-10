@@ -4,7 +4,10 @@ A Rust implementation of the \*arr stack, aiming for drop-in API compatibility w
 existing applications so the surrounding ecosystem — Bazarr, Jellyseerr, Recyclarr,
 mobile clients, dashboards — keeps working unchanged.
 
-> **Status: scaffolding.** No functionality yet. Crates are placeholders.
+> **Status: libraries only.** The Cardigann definition engine (parsing,
+> selectors, templates, filters, extraction) and the HTTP layer (client
+> abstraction, request building, login flows, Newznab/Torznab support) are
+> implemented as libraries. No server, database, or UI yet.
 
 ## Why
 

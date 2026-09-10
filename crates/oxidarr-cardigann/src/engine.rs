@@ -1,8 +1,10 @@
 //! Executes a definition's `search` block against a response body.
 
 use crate::error::CardigannError;
+use crate::filters::{self, FilterCtx, FilterOutcome};
 use crate::model::{Case, Definition, Field};
-use crate::{filters, selector, template};
+use crate::{selector, template};
+use chrono::{DateTime, Utc};
 use oxidarr_core::Release;
 use scraper::{ElementRef, Html, Node};
 use std::collections::{BTreeMap, HashSet};
@@ -19,6 +21,11 @@ use std::collections::{BTreeMap, HashSet};
 /// HTML document, where its selectors would match nothing and produce an
 /// empty result indistinguishable from a genuinely empty search.
 ///
+/// A row whose filter chain yields [`FilterOutcome::DropRow`] for any field
+/// (`andmatch` does this for a row missing a search keyword — see
+/// [`FilterOutcome`]) is skipped entirely rather than emitted with a
+/// partial value.
+///
 /// # Errors
 ///
 /// Returns [`CardigannError`] if the definition declares a JSON response, or
@@ -29,6 +36,7 @@ pub fn extract(
     def: &Definition,
     body: &str,
     config: &BTreeMap<String, String>,
+    ctx: &FilterCtx,
 ) -> Result<Vec<Release>, CardigannError> {
     // Checked from the DECLARED response type, not inferred from selector
     // shape. 95 of the 101 JSON definitions use a bare-identifier row
@@ -49,7 +57,7 @@ pub fn extract(
     let mut out = Vec::new();
     let skip = def.search.rows.after.unwrap_or(0);
 
-    for row in rows_selector
+    'rows: for row in rows_selector
         .select(doc.root_element())
         .into_iter()
         .skip(skip)
@@ -61,7 +69,10 @@ pub fn extract(
 
         let mut values: BTreeMap<String, String> = BTreeMap::new();
         for (name, field) in &def.search.fields {
-            let raw = evaluate_field(field, row, &scope)?;
+            let raw = match evaluate_field(field, row, &scope, ctx)? {
+                FilterOutcome::Value(v) => v,
+                FilterOutcome::DropRow => continue 'rows,
+            };
             scope.set_result(name, &raw);
             values.insert(name.clone(), raw);
         }
@@ -93,11 +104,16 @@ pub fn extract(
 ///    produced.
 /// 6. `default:` — substituted only when the result, after filtering, is
 ///    still empty.
+///
+/// Returns [`FilterOutcome::DropRow`] when any filter in the chain says to
+/// drop the row this field belongs to; the caller must skip the whole row,
+/// not just this field, when that happens.
 fn evaluate_field(
     field: &Field,
     row: ElementRef<'_>,
     scope: &template::Scope,
-) -> Result<String, CardigannError> {
+    ctx: &FilterCtx,
+) -> Result<FilterOutcome, CardigannError> {
     let mut value = if let Some(case) = &field.case {
         case_value(case, row, scope)?
     } else if let Some(text) = &field.text {
@@ -110,7 +126,10 @@ fn evaluate_field(
 
     for spec in &field.filters {
         let filter = filters::parse_filter(&spec.name, &spec.args.to_vec())?;
-        value = filters::apply(&filter, &value)?;
+        match filters::apply(&filter, &value, ctx)? {
+            FilterOutcome::Value(v) => value = v,
+            FilterOutcome::DropRow => return Ok(FilterOutcome::DropRow),
+        }
     }
 
     if value.is_empty()
@@ -119,7 +138,7 @@ fn evaluate_field(
         value.clone_from(default);
     }
 
-    Ok(value)
+    Ok(FilterOutcome::Value(value))
 }
 
 /// Resolves a `case:` field: the mapped value of the first entry (in
@@ -238,17 +257,20 @@ fn compile_html_selector(raw: &str) -> Result<selector::CompiledSelector, Cardig
 
 /// Maps extracted field values onto the canonical [`Release`].
 ///
-/// `date`/`categories` are deliberately left unmapped here: `dateparse`,
-/// `timeparse`, `timeago` and `fuzzytime` are all still identity no-ops (no
-/// clock has been wired into the engine yet), so a `date` field's raw
-/// value at this point is unparsed tracker-formatted text, not something
-/// that can be turned into a `DateTime<Utc>` without guessing a format.
-/// Mapping it in regardless would either panic-free-but-wrong (silently
-/// leave `publish_date` as `None`, no different from leaving it unmapped)
-/// or require inventing ad hoc parsing that duplicates and likely
-/// contradicts whatever the deferred date filters eventually do. Category
-/// mapping (`caps.categorymappings`) is a similarly separate, not-yet-built
-/// concern. Both are left to a later task.
+/// `publish_date` is populated from the `date` field's final (post-filter)
+/// value when, and only when, that value parses as RFC 3339 — which is
+/// exactly what `dateparse`/`timeparse`/`timeago`/`fuzzytime` emit on
+/// success. A definition whose `date` field has no such filter, or whose
+/// filter chain failed to recognise the input (both leave the raw
+/// tracker-formatted text untouched), yields `None` here rather than a
+/// guessed value: there is no way to turn arbitrary unparsed text into a
+/// `DateTime<Utc>` without inventing ad hoc parsing that would duplicate,
+/// and likely contradict, what those filters already do. The raw `date`
+/// value stays available under `.Result.date` for template references
+/// regardless.
+///
+/// `categories` is a separate, still-unmapped concern: it needs the
+/// `caps.categorymappings` subsystem, which does not exist yet.
 fn build_release(values: &BTreeMap<String, String>) -> Release {
     let get = |k: &str| values.get(k).map(String::as_str).unwrap_or_default();
     let non_empty = |k: &str| {
@@ -270,6 +292,9 @@ fn build_release(values: &BTreeMap<String, String>) -> Release {
     release.magnet_url = non_empty("magnet");
     release.info_hash = non_empty("infohash");
     release.imdb_id = non_empty("imdbid");
+    release.publish_date = DateTime::parse_from_rfc3339(get("date"))
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc));
     release.tmdb_id = get("tmdbid").parse().ok();
     release.tvdb_id = get("tvdbid").parse().ok();
     release.download_volume_factor = get("downloadvolumefactor").parse().unwrap_or(1.0);
@@ -346,6 +371,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::model::parse_definition;
+    use chrono::TimeZone;
 
     const DEF: &str = r"
 id: simple
@@ -375,7 +401,7 @@ search:
     fn releases() -> Vec<Release> {
         let def = parse_definition(DEF).unwrap();
         let html = include_str!("../tests/fixtures/simple_tracker.html");
-        extract(&def, html, &BTreeMap::new()).unwrap()
+        extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap()
     }
 
     #[test]
@@ -443,7 +469,8 @@ search:
 <tr class="result"><td class="name">B</td><td class="dl"></td></tr>
 </table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        let releases =
+            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
         assert!((releases[0].download_volume_factor - 0.0).abs() < f32::EPSILON);
         assert!((releases[1].download_volume_factor - 1.0).abs() < f32::EPSILON);
     }
@@ -472,7 +499,8 @@ search:
 <tr class="result"><td class="name">B</td><td class="dl"></td></tr>
 </table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        let releases =
+            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
         assert!((releases[0].download_volume_factor - 1.0).abs() < f32::EPSILON);
         assert!((releases[1].download_volume_factor - 1.0).abs() < f32::EPSILON);
     }
@@ -499,7 +527,8 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name">A</td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        let releases =
+            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
         assert_eq!(releases[0].genre.as_deref(), Some("Unknown"));
         assert_eq!(releases[0].description.as_deref(), Some("A"));
     }
@@ -521,7 +550,8 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name">Big Buck Bunny<span class="tag"> NEW</span></td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        let releases =
+            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
         assert_eq!(releases[0].title, "Big Buck Bunny");
     }
 
@@ -540,7 +570,8 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name">Big Buck<div><em><span class="tag"> NEW</span></em></div> Bunny</td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        let releases =
+            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
         assert_eq!(releases[0].title, "Big Buck Bunny");
     }
 
@@ -559,7 +590,8 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name"><span class="tag">[X]</span>Big<span class="tag">[Y]</span> Buck<span class="tag">[Z]</span> Bunny</td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        let releases =
+            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
         assert_eq!(releases[0].title, "Big Buck Bunny");
     }
 
@@ -573,16 +605,16 @@ search:
     }
 
     #[test]
-    fn date_and_categories_are_deliberately_unmapped_in_this_plan() {
-        // Pinning a KNOWN LIMITATION, not asserting desired behaviour.
+    fn a_date_field_with_no_rfc3339_producing_filter_leaves_publish_date_none() {
+        // A `date` field with no `dateparse`/`timeparse`/`timeago`/
+        // `fuzzytime` filter carries raw, tracker-formatted text that
+        // cannot be turned into a `DateTime<Utc>` without guessing a
+        // format, so `publish_date` must stay `None` rather than be
+        // populated from a guess.
         //
-        // `publish_date` needs the date filters (`dateparse`, `timeago`,
-        // `fuzzytime`, `timeparse`), which are identity no-ops until the
-        // engine is given a clock, and `categories` needs the
-        // `caps.categorymappings` subsystem. Both land in the next plan.
-        // Until then these two stay empty even when the definition extracts
-        // them, so this test exists to make that visible and to fail loudly
-        // the moment someone wires either one up without revisiting it.
+        // `categories` is a separate KNOWN LIMITATION, not asserted
+        // behaviour: it needs the `caps.categorymappings` subsystem, which
+        // does not exist yet. This test also pins that until it is built.
         let yaml = r"
 id: simple
 name: Simple
@@ -599,15 +631,46 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name">A</td><td class="date">2024-01-01</td><td class="cat">2000</td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        let releases =
+            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
         assert_eq!(releases[0].title, "A");
         assert!(
             releases[0].publish_date.is_none(),
-            "publish_date is unmapped until the date filters get a clock"
+            "a date field's raw value, with no RFC 3339-producing filter, must not populate publish_date"
         );
         assert!(
             releases[0].categories.is_empty(),
             "categories are unmapped until caps.categorymappings is implemented"
+        );
+    }
+
+    #[test]
+    fn publish_date_is_populated_when_the_date_field_parses_as_rfc3339() {
+        // The `date` field's filter chain ends in `dateparse`, which (per
+        // Tasks 3-4) emits an RFC 3339 string on success. That final value
+        // must land in `Release.publish_date` as a real `DateTime<Utc>`.
+        let yaml = r"
+id: simple
+name: Simple
+search:
+  rows:
+    selector: tr.result
+  fields:
+    title:
+      selector: td.name
+    date:
+      selector: td.date
+      filters:
+        - name: dateparse
+          args: yyyy-MM-dd
+";
+        let html = r#"<table><tr class="result"><td class="name">A</td><td class="date">2025-03-09</td></tr></table>"#;
+        let def = parse_definition(yaml).unwrap();
+        let releases =
+            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
+        assert_eq!(
+            releases[0].publish_date,
+            Some(Utc.with_ymd_and_hms(2025, 3, 9, 0, 0, 0).unwrap())
         );
     }
 
@@ -638,9 +701,39 @@ search:
             <tr class="result"><td class="fallback">OnlyFallback</td></tr>
         </table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases = extract(&def, html, &BTreeMap::new()).unwrap();
+        let releases =
+            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
         assert_eq!(releases[0].title, "Preferred");
         assert_eq!(releases[1].title, "OnlyFallback");
+    }
+
+    #[test]
+    fn andmatch_drops_rows_that_fail_to_match_every_keyword() {
+        // End-to-end through the 'rows: loop: a field's filter chain
+        // producing `FilterOutcome::DropRow` must skip that row entirely,
+        // not just leave the field empty.
+        let yaml = r"
+id: simple
+name: Simple
+search:
+  rows:
+    selector: tr.result
+  fields:
+    title:
+      selector: td.name
+      filters:
+        - name: andmatch
+";
+        let html = r#"<table>
+<tr class="result"><td class="name">Ubuntu 24.04 Server</td></tr>
+<tr class="result"><td class="name">Ubuntu 24.04 Desktop</td></tr>
+</table>"#;
+        let def = parse_definition(yaml).unwrap();
+        let mut ctx = FilterCtx::fixed_for_tests();
+        ctx.keywords = vec!["ubuntu".into(), "server".into()];
+        let releases = extract(&def, html, &BTreeMap::new(), &ctx).unwrap();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].title, "Ubuntu 24.04 Server");
     }
 
     #[test]
@@ -666,7 +759,12 @@ search:
       selector: name
 ";
         let def = parse_definition(yaml).unwrap();
-        let message = match extract(&def, r#"{"data":[{"name":"A"}]}"#, &BTreeMap::new()) {
+        let message = match extract(
+            &def,
+            r#"{"data":[{"name":"A"}]}"#,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+        ) {
             Ok(releases) => format!("accepted, returning {} releases", releases.len()),
             Err(e) => e.to_string(),
         };
@@ -696,7 +794,7 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name">A</td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let err = extract(&def, html, &BTreeMap::new()).unwrap_err();
+        let err = extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap_err();
         let message = err.to_string();
         assert!(
             message.contains("$.torrents[0].id"),

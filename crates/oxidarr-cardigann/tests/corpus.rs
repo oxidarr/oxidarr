@@ -224,12 +224,12 @@ fn every_selector_parses_as_standard_css() {
         for sel in selectors {
             total += 1;
             // Templated selectors cannot be parsed until they are rendered,
-            // and no template engine exists until Task 4. Expand every
-            // `{{ ... }}` construct into the set of residual selectors that
-            // could actually be rendered at runtime and require every one
-            // of them to compile — not just one branch of an `if`/`else`,
-            // since the branch never taken would otherwise never be
-            // checked at all.
+            // and this corpus check has no request/response context to
+            // render them against. Expand every `{{ ... }}` construct into
+            // the set of residual selectors that could actually be
+            // rendered at runtime and require every one of them to
+            // compile — not just one branch of an `if`/`else`, since the
+            // branch never taken would otherwise never be checked at all.
             if sel.contains("{{") {
                 let residuals = strip_template_spans(&sel);
                 if residuals
@@ -523,6 +523,106 @@ fn every_filter_used_by_the_corpus_is_implemented() {
     assert!(missing.is_empty(), "unimplemented filters: {missing:?}");
 }
 
+/// Recursively collects the layout argument of every `dateparse`/
+/// `timeparse` filter invocation in a definition, walking the same
+/// filter-invocation sites [`collect_filter_names`] does (`filters:`,
+/// `dateheaders:`'s nested `filters:`, `keywordsfilters:`).
+fn collect_date_time_layouts(node: &serde_yaml_ng::Value, out: &mut Vec<String>) {
+    match node {
+        serde_yaml_ng::Value::Mapping(map) => {
+            for (k, v) in map {
+                if matches!(
+                    k.as_str(),
+                    Some("filters" | "dateheaders" | "keywordsfilters")
+                ) && let Some(seq) = v.as_sequence()
+                {
+                    for item in seq {
+                        let is_date_or_time = item
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .is_some_and(|name| matches!(name, "dateparse" | "timeparse"));
+                        if !is_date_or_time {
+                            continue;
+                        }
+                        if let Some(layout) = item.get("args").and_then(first_filter_arg) {
+                            out.push(layout);
+                        }
+                    }
+                }
+                collect_date_time_layouts(v, out);
+            }
+        }
+        serde_yaml_ng::Value::Sequence(seq) => {
+            for v in seq {
+                collect_date_time_layouts(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Reads a filter's first argument out of its raw `args:` value, which is
+/// a bare scalar for a single-argument filter like `dateparse`/
+/// `timeparse` (`args: "yyyy-MM-dd"`) but a sequence for filters that take
+/// more than one (`args: ["|", -1]`).
+fn first_filter_arg(args: &serde_yaml_ng::Value) -> Option<String> {
+    match args {
+        serde_yaml_ng::Value::String(s) => Some(s.clone()),
+        serde_yaml_ng::Value::Sequence(seq) => seq.first().and_then(scalar_to_string),
+        other => scalar_to_string(other),
+    }
+}
+
+fn scalar_to_string(v: &serde_yaml_ng::Value) -> Option<String> {
+    match v {
+        serde_yaml_ng::Value::String(s) => Some(s.clone()),
+        serde_yaml_ng::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// Asserts every `dateparse`/`timeparse` layout argument in the corpus
+/// translates via [`oxidarr_cardigann::net_layout_to_chrono`] — the same
+/// .NET-layout translator `filters::apply` calls at request time. A
+/// layout that fails here would fail identically (and silently, since
+/// `dateparse`/`timeparse` pass unparseable input through unchanged)
+/// against real tracker results.
+#[test]
+fn every_dateparse_timeparse_layout_translates() {
+    let mut total = 0usize;
+    let mut failed = Vec::new();
+
+    for path in definition_paths() {
+        let Ok(doc) = load_definition(&path) else {
+            continue;
+        };
+        let mut layouts = Vec::new();
+        collect_date_time_layouts(&doc, &mut layouts);
+        for layout in layouts {
+            total += 1;
+            if oxidarr_cardigann::net_layout_to_chrono(&layout).is_err() {
+                failed.push(format!("{}: {layout:?}", path.display()));
+            }
+        }
+    }
+
+    assert!(
+        total > 400,
+        "expected 400+ dateparse/timeparse layouts, found {total}"
+    );
+    assert!(
+        failed.is_empty(),
+        "{} of {total} dateparse/timeparse layouts failed to translate:\n{}",
+        failed.len(),
+        failed
+            .iter()
+            .take(15)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
 #[test]
 fn every_definition_matches_the_v11_model() {
     let mut failures = Vec::new();
@@ -670,6 +770,7 @@ fn json_response_definitions_are_rejected_not_silently_empty() {
             &def,
             r#"{"data":[{"name":"x"}]}"#,
             &std::collections::BTreeMap::new(),
+            &oxidarr_cardigann::FilterCtx::fixed_for_tests(),
         )
         .is_ok()
         {
@@ -693,4 +794,162 @@ fn json_response_definitions_are_rejected_not_silently_empty() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+/// Recursively locates the `date` field's `filters:` sequence, if any, on
+/// a `search.fields` mapping.
+fn date_field_filters(doc: &serde_yaml_ng::Value) -> Option<Vec<serde_yaml_ng::Value>> {
+    let filters = doc
+        .get("search")?
+        .get("fields")?
+        .get("date")?
+        .get("filters")?
+        .as_sequence()?;
+    Some(filters.clone())
+}
+
+/// Whether a filter-chain's last entry is one of the four filters that emit
+/// an RFC 3339 string on success ([`dateparse`], [`timeparse`], [`timeago`],
+/// [`fuzzytime`]).
+fn ends_in_date_filter(filters: &[serde_yaml_ng::Value]) -> bool {
+    filters
+        .last()
+        .and_then(|last| last.get("name"))
+        .and_then(|n| n.as_str())
+        .is_some_and(|name| matches!(name, "dateparse" | "timeparse" | "timeago" | "fuzzytime"))
+}
+
+/// Counts definitions across the whole corpus whose `date` field's filter
+/// chain ends in an RFC 3339-emitting filter.
+///
+/// Related to, but deliberately narrower than, the floor the
+/// `every_dateparse_timeparse_layout_translates` gate established (400+
+/// `dateparse`/`timeparse` layout arguments). That count spans every
+/// filter-invocation site in a definition (`dateheaders:`, arbitrary
+/// fields, `keywordsfilters:`) and every occurrence, not just one count
+/// per definition — some of the 400+ have nothing to do with a release's
+/// `date` field at all (e.g. a `timeparse` used to build a pagination
+/// token). This gate counts something more specific: definitions where
+/// the field literally named `date` — the only field `build_release`
+/// reads into `publish_date` — ends its chain in one of the four
+/// RFC-3339-emitting filters. Measured directly against this corpus, that
+/// is 318, not 400+; 300 is used as a floor with headroom below the
+/// measured value, matching this file's convention elsewhere (e.g.
+/// `json_defs > 50` against a measured ~101) rather than restating the
+/// other gate's unrelated number.
+#[test]
+fn corpus_has_many_definitions_whose_date_field_ends_in_a_date_filter() {
+    let mut count = 0usize;
+    for path in definition_paths() {
+        let Ok(doc) = load_definition(&path) else {
+            continue;
+        };
+        let Some(filters) = date_field_filters(&doc) else {
+            continue;
+        };
+        if ends_in_date_filter(&filters) {
+            count += 1;
+        }
+    }
+    assert!(
+        count > 300,
+        "expected 300+ definitions whose date field ends in a date filter, found {count}"
+    );
+}
+
+/// Drives a synthetic HTML row through the real engine for three corpus
+/// definitions, hand-picked to cover distinct `date`-filter shapes, and
+/// asserts `Release.publish_date` comes out populated.
+///
+/// This is the actual non-vacuous, RESULT-level proof that the layout
+/// translator and RFC 3339 wire-up cooperate end to end on real corpus
+/// definitions, not just the handwritten fixture in
+/// `engine.rs`'s unit tests.
+///
+/// A generic "for every one of the 400+ definitions counted above,
+/// synthesize a matching row and check `publish_date`" gate was considered
+/// and rejected as too fragile: each definition's row/date selectors,
+/// pre-filters (`append`, `replace`, `re_replace`, …), and quirks (`case:`
+/// dates, `optional:`/`default:` dates, templated selectors) differ enough
+/// that a generic synthetic-row builder would either need per-file
+/// special-casing — defeating the point of a generic gate — or would
+/// silently skip most of the corpus and prove little. These three,
+/// verified by inspection to have no templated selectors, `case:`, or
+/// `optional:`/`default:` on the fields this test touches, give real,
+/// specific, re-runnable coverage instead:
+/// - `torrentbyte.yml`: `dateparse` with a full `yyyy-MM-dd HH:mm:ss zzz`
+///   timestamp-plus-offset layout (preceded by an `append` pre-filter that
+///   supplies the offset).
+/// - `fenyarnyek-tracker.yml`: `dateparse` with a bare `dd/MM/yyyy` date
+///   layout, no time or offset component.
+/// - `sexypics.yml`: `timeago`, the relative-time family rather than a
+///   fixed layout.
+#[test]
+fn representative_definitions_populate_publish_date_from_a_synthetic_row() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "torrentbyte.yml",
+            r#"<table><tbody><tr>
+                <td title="Some Release">Some Release</td>
+                <td>Movies</td>
+                <td>1.0 GB</td>
+                <td>1</td>
+                <td>2025-03-09 18:30:00</td>
+                <td>desc</td>
+            </tr></tbody></table>"#,
+        ),
+        (
+            "fenyarnyek-tracker.yml",
+            r#"<table class="lista"><tbody><tr>
+                <td><a href="index.php?page=torrent-details&amp;id=1">Title</a></td>
+                <td>cat</td>
+                <td>1.0 GB</td>
+                <td>09/03/2025</td>
+                <td><a href="download.php?id=1">DL</a></td>
+            </tr></tbody></table>"#,
+        ),
+        (
+            "sexypics.yml",
+            r#"<table><tbody><tr>
+                <td class="n"><a href="/details/1" title="Title">Title</a></td>
+                <td class="m"><a href="/magnet/1">M</a></td>
+                <td>3 hours ago</td>
+                <td class="s">10</td>
+                <td class="l">2</td>
+            </tr></tbody></table>"#,
+        ),
+    ];
+
+    let mut failures = Vec::new();
+    for (file, html) in cases {
+        let path = corpus_dir().join(file);
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            failures.push(format!("{file}: not found in corpus"));
+            continue;
+        };
+        let Ok(def) = oxidarr_cardigann::model::parse_definition(&raw) else {
+            failures.push(format!("{file}: failed to parse definition"));
+            continue;
+        };
+        let extracted = oxidarr_cardigann::engine::extract(
+            &def,
+            html,
+            &std::collections::BTreeMap::new(),
+            &oxidarr_cardigann::FilterCtx::fixed_for_tests(),
+        );
+        let Ok(releases) = extracted else {
+            failures.push(format!("{file}: extract failed"));
+            continue;
+        };
+        if releases.is_empty() {
+            failures.push(format!("{file}: synthetic row produced no releases"));
+            continue;
+        }
+        if releases[0].publish_date.is_none() {
+            failures.push(format!(
+                "{file}: publish_date is None for a synthetic row that should have parsed"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

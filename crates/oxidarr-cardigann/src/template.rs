@@ -18,6 +18,7 @@ pub struct Scope {
     config: HashMap<String, String>,
     result: HashMap<String, String>,
     categories: Vec<String>,
+    query: HashMap<String, String>,
 }
 
 impl Scope {
@@ -36,6 +37,19 @@ impl Scope {
 
     pub fn set_result(&mut self, k: &str, v: &str) {
         self.result.insert(k.to_string(), v.to_string());
+    }
+
+    /// Binds one `.Query.<name>` variable, e.g. `.Query.Keywords`/`.Query.Q`/
+    /// `.Query.IMDBID`/`.Query.Season`/`.Query.Ep`.
+    ///
+    /// Not part of the brief's original interface: the corpus only ever
+    /// reads the legacy `.Keywords`/`.Config.*` forms this module already
+    /// supported, but the search-query bridge (`oxidarr_indexer::scope_for`)
+    /// needs somewhere to publish a search's `q`/`imdb_id`/`season`/`episode`
+    /// under Jackett's `.Query.*` naming, so this mirrors `set_config`'s
+    /// shape for that namespace instead of adding a bespoke setter per name.
+    pub fn set_query(&mut self, k: &str, v: &str) {
+        self.query.insert(k.to_string(), v.to_string());
     }
 
     /// Binds the selected category IDs.
@@ -74,11 +88,13 @@ impl Scope {
                     self.config.get(name).cloned().unwrap_or_default()
                 } else if let Some(name) = p.strip_prefix(".Result.") {
                     self.result.get(name).cloned().unwrap_or_default()
+                } else if let Some(name) = p.strip_prefix(".Query.") {
+                    self.query.get(name).cloned().unwrap_or_default()
                 } else {
-                    // Unrecognised paths (`.Query.*`, `.DownloadUri.*`, ...)
-                    // are outside this task's scope; rendering them as
-                    // empty matches Go's behaviour for a nil field and
-                    // keeps unknown forms from turning into hard errors.
+                    // Unrecognised paths (`.DownloadUri.*`, ...) are outside
+                    // this task's scope; rendering them as empty matches
+                    // Go's behaviour for a nil field and keeps unknown forms
+                    // from turning into hard errors.
                     String::new()
                 }
             }
@@ -979,5 +995,20 @@ mod tests {
     #[test]
     fn unsupported_directive_is_an_error() {
         assert!(render("{{ nosuchthing .Keywords }}", &scope()).is_err());
+    }
+
+    #[test]
+    fn substitutes_query_variables() {
+        let mut s = Scope::new();
+        s.set_query("Q", "ubuntu");
+        s.set_query("IMDBID", "tt0000000");
+        assert_eq!(render("{{ .Query.Q }}", &s).unwrap(), "ubuntu");
+        assert_eq!(render("{{ .Query.IMDBID }}", &s).unwrap(), "tt0000000");
+    }
+
+    #[test]
+    fn unset_query_variable_is_empty() {
+        let s = Scope::new();
+        assert_eq!(render("{{ .Query.Season }}", &s).unwrap(), "");
     }
 }
