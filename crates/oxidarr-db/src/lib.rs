@@ -3,8 +3,31 @@
 //! [`Db`] owns a `SQLx` connection pool opened against either a file
 //! ([`Db::open`]) or an in-memory database ([`Db::open_in_memory`]), applying
 //! the crate's embedded migrations on open so callers never see a
-//! partially-migrated schema. Repository types built on top of [`Db`] land
-//! in later work; this crate currently only owns the pool and the schema.
+//! partially-migrated schema.
+//!
+//! Four repositories sit on top of [`Db`], one per table in the schema:
+//!
+//! - [`ConfigRepo`] — the `config` key/value table, plus generation of a
+//!   persistent instance API key on first use.
+//! - [`IndexerRepo`] — the `indexers` table: insert/get/list/update/delete
+//!   over [`IndexerRow`], with definition-specific settings stored as a JSON
+//!   `TEXT` column and [`IndexerKind`] mapped to the lowercase strings the
+//!   column's `CHECK` constraint allows.
+//! - [`ApplicationRepo`] — the `applications` table: insert/get/list/
+//!   update/delete over [`ApplicationRow`], with [`AppKind`] and
+//!   [`SyncLevel`] mapped the same way.
+//! - [`MappingRepo`] — the `app_indexer_map` table linking an application to
+//!   an indexer and the id the indexer is known by inside that application;
+//!   `set` upserts, and `delete` is idempotent since sync reconciliation
+//!   deletes stale mappings without first checking they exist.
+//!
+//! Every fallible operation returns [`DbError`]: [`DbError::Sqlx`] for
+//! connection, query, and constraint failures; [`DbError::Migrate`] if
+//! embedded migrations fail to apply; [`DbError::NotFound`] for lookups by
+//! id or key that match no row; and [`DbError::Corrupt`] if a stored value
+//! (a `kind`, a `settings` blob, an `added` timestamp, or a row id that no
+//! longer fits the id newtype) cannot be decoded back into its Rust
+//! representation.
 
 pub mod application;
 pub mod config;
