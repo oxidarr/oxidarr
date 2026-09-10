@@ -6,10 +6,12 @@
 //! partially-migrated schema. Repository types built on top of [`Db`] land
 //! in later work; this crate currently only owns the pool and the schema.
 
+pub mod application;
 pub mod config;
 pub mod error;
 pub mod indexer;
 
+pub use application::{AppKind, ApplicationRepo, ApplicationRow, NewApplication, SyncLevel};
 pub use config::ConfigRepo;
 pub use error::DbError;
 pub use indexer::{IndexerKind, IndexerRepo, IndexerRow, NewIndexer};
