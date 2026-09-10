@@ -1198,6 +1198,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxidarr-migrate"
+version = "0.0.0"
+dependencies = [
+ "oxidarr-db",
+ "sqlx",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "oxidarr-prowl"
 version = "0.0.0"
 
