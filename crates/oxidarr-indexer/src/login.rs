@@ -157,7 +157,7 @@ pub async fn verify_login<C: HttpClient>(
 /// - `method: post` / `method: get`: renders `login.inputs` and
 ///   `login.headers` against a [`oxidarr_cardigann::template::Scope`] built
 ///   the same way a search's would be
-///   (`scope_for(def, &SearchQuery::default(), s)`), submits them to
+///   (`scope_for(def, &SearchQuery::default(), s, &[])`), submits them to
 ///   `login.path` (resolved against `def.links`' first entry, the same
 ///   convention `builder::build_search_requests` uses) — a form body for
 ///   POST, query pairs for GET — then runs [`check_error_rules`] on the
@@ -248,7 +248,11 @@ async fn submit_login<C: HttpClient>(
         LoginError::Definition(format!("login block for {} declares no path", def.id))
     })?;
     let base = base_url(def)?;
-    let scope = scope_for(def, &SearchQuery::default(), settings);
+    // No category-scoped search exists at login time, so `.Categories`
+    // renders empty — matches Jackett's own `GetBaseTemplateVariables`,
+    // which never sets `.Categories` at all (see `scope_for`'s doc
+    // comment).
+    let scope = scope_for(def, &SearchQuery::default(), settings, &[]);
 
     let rendered_path =
         template::render(path, &scope).map_err(|err| LoginError::Definition(err.to_string()))?;
@@ -366,7 +370,7 @@ async fn verify_test<C: HttpClient>(
 ///    form) via [`evaluate_login_field`].
 /// 5. Overlay rendered `login.inputs` (scope built the same way
 ///    `submit_login` builds one, via `scope_for(def, &SearchQuery::default(),
-///    settings)`). When `login.selectors` is set, `login.inputs`' keys are
+///    settings, &[])`). When `login.selectors` is set, `login.inputs`' keys are
 ///    CSS selectors resolved (via [`resolve_input_name`]) to the matched
 ///    element's `name` attribute rather than being used as literal input
 ///    names.
@@ -409,7 +413,8 @@ async fn form_login<C: HttpClient>(
         LoginError::Definition(format!("login block for {} declares no path", def.id))
     })?;
     let base = base_url(def)?;
-    let scope = scope_for(def, &SearchQuery::default(), settings);
+    // See `submit_login`'s identical call for why `&[]`.
+    let scope = scope_for(def, &SearchQuery::default(), settings, &[]);
 
     let rendered_path =
         template::render(path, &scope).map_err(|err| LoginError::Definition(err.to_string()))?;
