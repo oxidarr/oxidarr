@@ -148,7 +148,7 @@ fn effective_paths(search: &Search) -> Vec<SearchPath> {
                 inputs: BTreeMap::new(),
                 categories: Vec::new(),
                 response: None,
-                followredirect: false,
+                followredirect: None,
             }]
         })
         .unwrap_or_default()
@@ -239,6 +239,25 @@ fn render_input(
     Ok(RenderedInput::Pair(key.to_string(), rendered))
 }
 
+/// Builds one [`HttpRequest`] for `path`.
+///
+/// `path.followredirect` maps straight onto [`HttpRequest::follow_redirects`],
+/// defaulting to `true` when the key is absent from the definition — not
+/// Jackett's own default. Jackett's HTTP client disables auto-redirect
+/// globally (`AllowAutoRedirect = false`, `HttpWebClient2.cs`) and only
+/// follows a search path's redirect when `SearchPath.Followredirect` is
+/// explicitly `true` (`CardigannIndexer.cs`, guarding every
+/// `FollowIfRedirect` call for a search response on `response.IsRedirect &&
+/// SearchPath.Followredirect`); the corpus confirms this is opt-in — of the
+/// 21 `followredirect` occurrences across `.definitions/v11`, every single
+/// one sets `true`, none ever sets `false`. Defaulting an *absent* key to
+/// `false` here would therefore flip this crate's pre-Task-6 behaviour
+/// (`ReqwestClient` always followed every redirect unconditionally) to
+/// "never follow unless declared" for the entire rest of the corpus that
+/// never mentions the key — a real regression risk this task deliberately
+/// avoids by keeping the always-follow default and only opting a path *out*
+/// via an explicit `followredirect: false` (see the task report for the
+/// full citation and the corpus survey command).
 fn build_request(
     def: &Definition,
     search: &Search,
@@ -329,6 +348,7 @@ fn build_request(
         url,
         headers,
         body,
+        follow_redirects: path.followredirect.unwrap_or(true),
     })
 }
 
@@ -915,6 +935,73 @@ search:
         let requests = build_search_requests(&def, &q, &Settings::default()).unwrap();
 
         assert_eq!(requests[0].url.as_str(), "https://example.org/sub/browse");
+    }
+
+    #[test]
+    fn a_path_with_no_followredirect_key_defaults_to_following_redirects() {
+        // Absent `followredirect` must map to `follow_redirects: true` —
+        // the overwhelming majority of the corpus never declares the key at
+        // all, and pre-Task-6 behaviour always followed redirects
+        // unconditionally; see the task report for the corpus survey and
+        // the Jackett source citations behind this default.
+        let def = parse(MINIMAL);
+        let q = query("ubuntu", vec![]);
+
+        let requests = build_search_requests(&def, &q, &Settings::default()).unwrap();
+
+        assert!(requests[0].follow_redirects);
+    }
+
+    #[test]
+    fn a_path_with_explicit_followredirect_false_disables_following() {
+        let def = parse(
+            r"
+id: example
+name: Example
+links:
+  - https://example.org/
+search:
+  paths:
+    - path: browse
+      followredirect: false
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+",
+        );
+        let q = query("ubuntu", vec![]);
+
+        let requests = build_search_requests(&def, &q, &Settings::default()).unwrap();
+
+        assert!(!requests[0].follow_redirects);
+    }
+
+    #[test]
+    fn a_path_with_explicit_followredirect_true_follows() {
+        let def = parse(
+            r"
+id: example
+name: Example
+links:
+  - https://example.org/
+search:
+  paths:
+    - path: browse
+      followredirect: true
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+",
+        );
+        let q = query("ubuntu", vec![]);
+
+        let requests = build_search_requests(&def, &q, &Settings::default()).unwrap();
+
+        assert!(requests[0].follow_redirects);
     }
 
     #[test]

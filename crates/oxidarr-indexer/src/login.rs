@@ -134,6 +134,7 @@ pub async fn verify_login<C: HttpClient>(
         url,
         headers: Vec::new(),
         body: None,
+        follow_redirects: true,
     };
     let resp = client.execute(req).await?;
 
@@ -293,6 +294,7 @@ async fn submit_login<C: HttpClient>(
         url,
         headers,
         body,
+        follow_redirects: true,
     };
     let resp = client.execute(req).await?;
     check_error_rules(&login.error, &resp.text())?;
@@ -436,6 +438,7 @@ async fn form_login<C: HttpClient>(
         url: login_url,
         headers: cookie.clone().into_iter().collect(),
         body: None,
+        follow_redirects: true,
     };
     let landing = client.execute(get_req).await?;
     let body = landing.text().into_owned();
@@ -503,6 +506,7 @@ async fn form_login<C: HttpClient>(
         url: submit_url,
         headers,
         body: Some(Body::Form(pairs)),
+        follow_redirects: true,
     };
     let resp = client.execute(post_req).await?;
     check_error_rules(&login.error, &resp.text())?;

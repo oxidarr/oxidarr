@@ -99,7 +99,7 @@ fn effective_reachable_paths(def: &Definition, q: &SearchQuery) -> Vec<SearchPat
                     inputs: BTreeMap::new(),
                     categories: Vec::new(),
                     response: None,
-                    followredirect: false,
+                    followredirect: None,
                 }]
             })
             .unwrap_or_default()

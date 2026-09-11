@@ -175,6 +175,10 @@ impl<C: HttpClient> ApiIndexer<C> {
             url,
             headers: Vec::new(),
             body: None,
+            // Newznab/Torznab has no per-request redirect policy of its
+            // own; always follow, matching this crate's pre-Task-6 default
+            // for every request.
+            follow_redirects: true,
         };
         let resp = self.client.execute(req).await?;
 

@@ -137,8 +137,15 @@ pub struct SearchPath {
     pub categories: Vec<String>,
     #[serde(default)]
     pub response: Option<Response>,
+    /// Whether requests to this path should follow HTTP redirects.
+    ///
+    /// `None` when the definition does not declare the key at all —
+    /// distinct from an explicit `followredirect: false` — so a consumer
+    /// can default absent to whatever it needs without losing that
+    /// distinction (see `oxidarr_indexer::builder`'s mapping and the Task 6
+    /// report for why that distinction matters here).
     #[serde(default)]
-    pub followredirect: bool,
+    pub followredirect: Option<bool>,
 }
 
 /// How to interpret a path's response body.
@@ -810,6 +817,67 @@ search:
         let def = parse_definition(yaml).unwrap();
         assert!(def.caps.categorymappings[0].default);
         assert!(!def.caps.categorymappings[1].default);
+    }
+
+    #[test]
+    fn path_followredirect_is_none_when_the_key_is_absent() {
+        let yaml = r"
+id: example
+name: Example
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+";
+        let def = parse_definition(yaml).unwrap();
+        assert_eq!(def.search.paths[0].followredirect, None);
+    }
+
+    #[test]
+    fn path_followredirect_explicit_false_is_distinct_from_absent() {
+        // teamos.yml's shape, negated: an explicit `false` must round-trip
+        // as `Some(false)`, not collapse into the same `None` an absent key
+        // produces — that distinction is the whole point of `Option<bool>`
+        // here (see the field's doc comment).
+        let yaml = r"
+id: example
+name: Example
+search:
+  paths:
+    - path: browse
+      followredirect: false
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+";
+        let def = parse_definition(yaml).unwrap();
+        assert_eq!(def.search.paths[0].followredirect, Some(false));
+    }
+
+    #[test]
+    fn path_followredirect_explicit_true_is_captured() {
+        // teamos.yml's actual shape (`followredirect: true` on every path).
+        let yaml = r"
+id: example
+name: Example
+search:
+  paths:
+    - path: browse
+      followredirect: true
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+";
+        let def = parse_definition(yaml).unwrap();
+        assert_eq!(def.search.paths[0].followredirect, Some(true));
     }
 
     #[test]

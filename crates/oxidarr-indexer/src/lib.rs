@@ -18,9 +18,12 @@
 //!
 //! # Known limitations
 //!
-//! - A definition's `followredirect` field is parsed but not honoured:
-//!   requests always follow redirects, regardless of what the definition
-//!   declares.
+//! - A search path's `followredirect` is honoured (see
+//!   [`client::HttpRequest::follow_redirects`] and [`builder`]'s mapping),
+//!   defaulting to following when the key is absent. A definition's
+//!   top-level `followredirect` (distinct from each path's own) is still
+//!   parsed but not consulted: login requests always follow redirects
+//!   regardless of what it declares (see [`login::authenticate`]).
 //! - `t=caps` (indexer capability negotiation, including category mappings)
 //!   is not fetched or modelled; it lands with the category-mapping
 //!   subsystem.
