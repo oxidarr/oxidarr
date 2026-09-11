@@ -196,6 +196,14 @@ pub async fn verify_login<C: HttpClient>(
 /// [`LoginError::Http`], or [`LoginError::Definition`] (a missing/malformed
 /// `login.path`, an unresolvable base link, an unconfigured `cookie`
 /// setting, or an unimplemented method) — see [`LoginError`]'s variants.
+///
+/// # Known limitation
+/// Login pages are decoded as UTF-8, invalid sequences replaced, regardless
+/// of the definition's declared `encoding` — unlike the search path, which
+/// decodes per that encoding (see `crate::decode::decode_body`). Login
+/// bodies carry form fields (credentials, tokens), where mangled bytes
+/// matter far less than in a release title, so this is left for a later
+/// pass.
 pub async fn authenticate<C: HttpClient>(
     client: &C,
     def: &Definition,

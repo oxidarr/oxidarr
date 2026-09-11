@@ -11,7 +11,9 @@ use chrono::{DateTime, TimeZone, Utc};
 use oxidarr_cardigann::model::parse_definition;
 use oxidarr_indexer::Settings;
 use oxidarr_indexer::testing::{FakeClient, ok_html};
-use oxidarr_indexer::{CardigannIndexer, Indexer, IndexerError, LoginError, Method, SearchQuery};
+use oxidarr_indexer::{
+    CardigannIndexer, HttpResponse, Indexer, IndexerError, LoginError, Method, SearchQuery,
+};
 
 const TRACKER_SEARCH_HTML: &str = include_str!("fixtures/tracker_search.html");
 
@@ -216,4 +218,53 @@ async fn a_search_error_with_no_login_block_is_a_typed_error_with_no_retry() {
         err,
         IndexerError::Login(LoginError::Rejected(msg)) if msg == "Banned"
     ));
+}
+
+const DEFINITION_WINDOWS_1251: &str = r"
+id: example
+name: Example
+encoding: windows-1251
+links:
+  - https://example.org/
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: tr.result
+  fields:
+    title:
+      selector: td.name a
+  error:
+    - selector: div.searcherror
+";
+
+#[tokio::test]
+async fn search_decodes_a_windows_1251_body_per_the_definitions_encoding() {
+    // The fixture body's title cannot be UTF-8: it is built from raw
+    // windows-1251 bytes ("Тест" = [0xD2, 0xE5, 0xF1, 0xF2]), so
+    // `ok_html`'s `&str`-based helper can't produce it — a plain
+    // `HttpResponse` with a hand-built `Vec<u8>` body is used instead.
+    let def = parse_definition(DEFINITION_WINDOWS_1251).unwrap();
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        br#"<html><body><table><tr class="result"><td class="name"><a href="/details/1">"#,
+    );
+    body.extend_from_slice(&[0xD2, 0xE5, 0xF1, 0xF2]); // "Тест" in windows-1251
+    body.extend_from_slice(br"</a></td></tr></table></body></html>");
+    let response = HttpResponse {
+        status: 200,
+        headers: vec![],
+        body,
+        final_url: "https://example.org/browse".parse().unwrap(),
+    };
+    let client = FakeClient::new().expect(
+        |r| r.method == Method::Get && r.url.path() == "/browse",
+        response,
+    );
+    let indexer = CardigannIndexer::with_clock(def, Settings::default(), client, fixed_now);
+
+    let releases = indexer.search(&SearchQuery::default()).await.unwrap();
+
+    assert_eq!(releases.len(), 1);
+    assert_eq!(releases[0].title, "Тест");
 }

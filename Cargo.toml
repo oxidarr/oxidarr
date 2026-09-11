@@ -46,6 +46,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 scraper = "0.27"
 quick-xml = { version = "0.41", features = ["serialize"] }
+encoding_rs = "0.8"
 regex = "1"
 fancy-regex = "0.19"
 url = "2"

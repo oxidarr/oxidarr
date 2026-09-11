@@ -24,14 +24,13 @@
 //! - `t=caps` (indexer capability negotiation, including category mappings)
 //!   is not fetched or modelled; it lands with the category-mapping
 //!   subsystem.
-//! - Response bodies are decoded as UTF-8 with invalid sequences replaced.
-//!   Definitions that declare a non-UTF-8 page encoding (`windows-1251` and
-//!   similar, roughly 8% of the corpus) are decoded lossily rather than
-//!   through their declared encoding.
+//! - Search bodies are decoded per the definition's declared `encoding`;
+//!   login pages are not yet — see [`login::authenticate`]'s doc comment.
 
 pub mod builder;
 pub mod cardigann;
 pub mod client;
+mod decode;
 pub mod error;
 pub mod indexer;
 pub mod login;
