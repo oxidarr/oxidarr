@@ -1,7 +1,8 @@
 //! Shared Prowlarr-shaped response DTOs, reused by more than one `/api/v1`
 //! endpoint. Task 4 ([`crate::api::indexer_schema`]) starts this module with
-//! the indexer schema shapes; later tasks in this plan extend it with
-//! indexer/application CRUD payloads.
+//! the indexer schema shapes; Task 5 ([`crate::api::indexers`]) and Task 6
+//! ([`crate::api::applications`]) extend it with indexer/application CRUD
+//! payloads.
 //!
 //! # Prowlarr shapes
 //!
@@ -11,10 +12,13 @@
 //! `src/Prowlarr.Http/ClientSchema/Field.cs`,
 //! `src/Prowlarr.Api.V1/Indexers/IndexerCapabilityResource.cs`,
 //! `src/NzbDrone.Core/Indexers/IndexerCategory.cs`,
-//! `src/NzbDrone.Core/ThingiProvider/ProviderDefinition.cs`, and
-//! `src/NzbDrone.Core/Indexers/IndexerDefinition.cs` from
+//! `src/NzbDrone.Core/ThingiProvider/ProviderDefinition.cs`,
+//! `src/NzbDrone.Core/Indexers/IndexerDefinition.cs`,
+//! `src/Prowlarr.Api.V1/Applications/ApplicationResource.cs`, and
+//! `src/NzbDrone.Core/Applications/Sonarr/SonarrSettings.cs` from
 //! `Prowlarr/Prowlarr` at commit `693c7c3b0e8ec6e9dd792c01e5fa1091260b3be1`
-//! (the same commit [`crate::api::system`] cites).
+//! (the same commit [`crate::api::system`] cites). See [`ApplicationResource`]'s
+//! own doc comment for the application-specific citations.
 //!
 //! [`IndexerResource`] ships the honest subset of `ProviderResource<T>` +
 //! `IndexerResource`'s ~20 combined fields that this crate's own indexer
@@ -66,6 +70,7 @@
 use std::collections::BTreeMap;
 
 use oxidarr_cardigann::model::Setting;
+use oxidarr_db::SyncLevel;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -220,6 +225,42 @@ fn field_value(setting: &Setting) -> Option<Value> {
 pub struct SelectOption {
     pub value: usize,
     pub name: String,
+}
+
+/// Prowlarr's `ApplicationResource`
+/// (`src/Prowlarr.Api.V1/Applications/ApplicationResource.cs`, same commit
+/// as this module's other citations), cut to the fields
+/// [`crate::api::applications`]'s CRUD actually needs.
+///
+/// `ApplicationResource` itself is a thin subclass of the same
+/// `ProviderResource<T>` base [`IndexerResource`] draws `id`/`name`/
+/// `implementation`/`fields` from, plus its own `syncLevel`. This crate
+/// omits every `ProviderResource` field [`IndexerResource`] already omits
+/// (`configContract`, `infoLink`, `message`, `tags`, `status`, ...) for the
+/// same reason: no consumer here reads Prowlarr's Angular UI shape, only a
+/// human or this plan's own CRUD reading the JSON directly.
+///
+/// `fields` carries `baseUrl`/`apiKey` — confirmed against
+/// `src/NzbDrone.Core/Applications/Sonarr/SonarrSettings.cs` (same commit),
+/// whose `BaseUrl`/`ApiKey` properties are exactly [`crate::api::applications`]'s
+/// two settings (Radarr's own `RadarrSettings.cs` declares the identical
+/// pair). Real Prowlarr's `SonarrSettingsValidator` requires `ApiKey` to be
+/// non-empty and `BaseUrl` to be a valid URL — [`crate::api::applications`]'s
+/// own validation mirrors both rules.
+///
+/// Deserializes as well as serializes, for the same reason
+/// [`IndexerResource`] does: `POST`/`PUT /applications` request bodies reuse
+/// this exact shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationResource {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub id: i32,
+    pub name: String,
+    pub implementation: String,
+    pub sync_level: SyncLevel,
+    #[serde(default)]
+    pub fields: Vec<Field>,
 }
 
 #[cfg(test)]

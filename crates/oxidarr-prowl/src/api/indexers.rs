@@ -93,7 +93,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use oxidarr_core::ids::IndexerId;
-use oxidarr_db::{DbError, IndexerKind, IndexerRepo, IndexerRow, NewIndexer};
+use oxidarr_db::{IndexerKind, IndexerRepo, IndexerRow, NewIndexer};
 use oxidarr_http::Problem;
 use oxidarr_indexer::{
     CardigannIndexer, HttpClient, Indexer, NewznabIndexer, SearchQuery, Settings, TorznabIndexer,
@@ -102,6 +102,7 @@ use serde_json::Value;
 use url::Url;
 
 use crate::api::dto::{Field, IndexerCapabilities, IndexerResource};
+use crate::api::{bad_request, db_error_to_problem};
 use crate::definitions::DefinitionStore;
 use crate::server::{AppState, settings_from_json};
 
@@ -215,31 +216,6 @@ where
 {
     run_test(&resource, &state.defs, state.client.clone()).await?;
     Ok(Json(Vec::new()))
-}
-
-/// Maps a [`DbError`] onto a [`Problem`]: [`DbError::NotFound`] (whose
-/// `Display` already names the id, e.g. `"indexer not found: 7"`) becomes a
-/// `404`; every other variant (a genuine database/encoding failure) becomes
-/// a `500`, still carrying the error's own message.
-// Every call site passes this to `.map_err(db_error_to_problem)`, which
-// hands `map_err`'s closure the error by value — taking `&DbError` instead
-// (clippy's own suggestion) would force every one of those five call sites
-// into a wrapping closure just to re-borrow, for no actual benefit: nothing
-// here needs ownership, but nothing is freed by giving it up either.
-#[allow(clippy::needless_pass_by_value)]
-fn db_error_to_problem(err: DbError) -> Problem {
-    let status = match err {
-        DbError::NotFound { .. } => StatusCode::NOT_FOUND,
-        DbError::Sqlx(_) | DbError::Migrate(_) | DbError::Corrupt { .. } => {
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    };
-    Problem::new(status, err.to_string())
-}
-
-/// Builds a `400` [`Problem`] carrying `message`.
-fn bad_request(message: impl Into<String>) -> Problem {
-    Problem::new(StatusCode::BAD_REQUEST, message)
 }
 
 /// Maps `implementation` (as sent in an `IndexerResource` request body) onto

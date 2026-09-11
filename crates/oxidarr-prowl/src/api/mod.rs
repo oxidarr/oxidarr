@@ -26,20 +26,36 @@
 //!
 //! [`indexers`] — indexer CRUD (`GET`/`POST`/`PUT`/`DELETE /indexer[/{id}]`)
 //! plus `POST /indexer/test`, the first module here that reads every part of
-//! `state` (`db`, `defs`, and `client`). Later tasks in this plan add
-//! further sibling modules (application CRUD, sync) alongside it.
+//! `state` (`db`, `defs`, and `client`).
+//!
+//! [`applications`] — application CRUD (`GET`/`POST`/`PUT`/`DELETE
+//! /applications[/{id}]`) plus `POST /applications/test`, [`indexers`]'s
+//! sibling: same shape, `ApplicationRepo` in place of `IndexerRepo`. Later
+//! tasks in this plan add further sibling modules (sync) alongside it.
 //!
 //! [`dto`] — Prowlarr-shaped response DTOs shared by more than one endpoint
-//! here; [`indexer_schema`] and [`indexers`] both build on it.
+//! here; [`indexer_schema`], [`indexers`], and [`applications`] all build on
+//! it.
+//!
+//! # Shared error mapping
+//!
+//! [`db_error_to_problem`] and [`bad_request`] live here (not in either CRUD
+//! module) because both [`indexers`] and [`applications`] need the exact
+//! same [`DbError`]/`400`-message-carrying [`Problem`] mapping — extracted
+//! once [`applications`] made it a second call site, rather than duplicated.
 
+pub mod applications;
 pub mod dto;
 pub mod indexer_schema;
 pub mod indexers;
 pub mod system;
 
 use axum::Router;
+use axum::http::StatusCode;
 use axum::middleware;
 use chrono::{DateTime, Utc};
+use oxidarr_db::DbError;
+use oxidarr_http::Problem;
 use oxidarr_http::auth::{ApiKey, require_api_key};
 use oxidarr_indexer::HttpClient;
 
@@ -53,15 +69,42 @@ use crate::server::AppState;
 /// where a real caller supplies `Utc::now()`.
 ///
 /// The `C: HttpClient` bound (absent before [`indexers`] landed) is now
-/// required here because [`indexers::router`]'s `POST /indexer/test` route
-/// executes a real search through `state.client`.
+/// required here because [`indexers::router`]'s `POST /indexer/test` and
+/// [`applications::router`]'s `POST /applications/test` routes execute a
+/// real request through `state.client`.
 pub fn api_router<C>(state: AppState<C>, key: ApiKey, start_time: DateTime<Utc>) -> Router
 where
     C: HttpClient + Clone + Send + Sync + 'static,
 {
     let v1 = system::router(start_time)
         .merge(indexer_schema::router(state.defs.clone()))
-        .merge(indexers::router(state))
+        .merge(indexers::router(state.clone()))
+        .merge(applications::router(state))
         .layer(middleware::from_fn_with_state(key, require_api_key));
     Router::new().nest("/api/v1", v1)
+}
+
+/// Maps a [`DbError`] onto a [`Problem`]: [`DbError::NotFound`] (whose
+/// `Display` already names the id, e.g. `"indexer not found: 7"`) becomes a
+/// `404`; every other variant (a genuine database/encoding failure) becomes
+/// a `500`, still carrying the error's own message.
+// Every call site passes this to `.map_err(db_error_to_problem)`, which
+// hands `map_err`'s closure the error by value — taking `&DbError` instead
+// (clippy's own suggestion) would force every one of those call sites into a
+// wrapping closure just to re-borrow, for no actual benefit: nothing here
+// needs ownership, but nothing is freed by giving it up either.
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn db_error_to_problem(err: DbError) -> Problem {
+    let status = match err {
+        DbError::NotFound { .. } => StatusCode::NOT_FOUND,
+        DbError::Sqlx(_) | DbError::Migrate(_) | DbError::Corrupt { .. } => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    };
+    Problem::new(status, err.to_string())
+}
+
+/// Builds a `400` [`Problem`] carrying `message`.
+pub(crate) fn bad_request(message: impl Into<String>) -> Problem {
+    Problem::new(StatusCode::BAD_REQUEST, message)
 }
