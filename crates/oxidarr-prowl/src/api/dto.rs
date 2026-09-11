@@ -69,7 +69,9 @@
 
 use std::collections::BTreeMap;
 
+use chrono::SecondsFormat;
 use oxidarr_cardigann::model::Setting;
+use oxidarr_core::Release;
 use oxidarr_db::SyncLevel;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -263,9 +265,106 @@ pub struct ApplicationResource {
     pub fields: Vec<Field>,
 }
 
+/// Prowlarr's `ReleaseResource`
+/// (`src/Prowlarr.Api.V1/Search/ReleaseResource.cs` at commit
+/// `693c7c3b0e8ec6e9dd792c01e5fa1091260b3be1`, unchanged on `develop` as of
+/// this writing), cut to the fields [`crate::api::search`]'s `GET
+/// /api/v1/search` endpoint can actually populate from an
+/// [`oxidarr_core::Release`].
+///
+/// # Field mapping and honest-subset choices
+///
+/// | Field | Source | Note |
+/// |---|---|---|
+/// | `guid` | always `None` | Real Prowlarr's `ReleaseInfo.Guid` comes from the raw feed's own `<guid>` element. [`oxidarr_indexer::rss::parse_feed`] only ever folds a `<guid>` into [`Release::details_url`] when it looks like a URL (see that module's own doc comment) — it is never kept as a value of its own on [`Release`], so there is nothing honest to put here yet |
+/// | `title` | `Release::title` | |
+/// | `size` | `Release::size` | `long Size` on the real resource is never null (`Size = releaseInfo.Size ?? 0`); mirrored here as a plain `u64` defaulting to `0`, not `Option<u64>` |
+/// | `seeders`/`leechers` | `Release::seeders`/`Release::leechers` | real `int?`, nullable both sides |
+/// | `infoUrl` | `Release::details_url` | |
+/// | `downloadUrl` | `Release::download_url` | |
+/// | `magnetUrl` | `Release::magnet_url` | |
+/// | `indexerId`/`indexer` | the [`oxidarr_db::IndexerRow`] the search ran against, not `Release` itself — one release carries no notion of which indexer it came from until [`crate::api::search`] attaches it | |
+/// | `categories` | `Release::categories` | real `Categories` is `ICollection<IndexerCategory>` (`{id, name}` objects, the same shape [`IndexerCategory`] models); this endpoint reports bare Newznab category ids instead — the same flattening judgment call [`IndexerCapabilities`]'s own doc comment already makes for `t=caps`, extended here rather than re-litigated |
+/// | `publishDate` | `Release::publish_date` | RFC 3339, `Z`-suffixed via [`chrono::DateTime::to_rfc3339_opts`]; `None` renders as an absent field rather than real Prowlarr's non-nullable `DateTime` (which defaults to `0001-01-01T00:00:00` when unset) — fabricating a fake epoch is worse than omitting a date nobody parsed out of the feed |
+/// | `grabs` | `Release::grabs` | |
+/// | `downloadVolumeFactor`/`uploadVolumeFactor` | `Release::download_volume_factor`/`Release::upload_volume_factor` | **not** part of real Prowlarr's wire `ReleaseResource` at all — verified against both the pinned commit and current `develop`: the two properties live only on the internal `TorrentInfo` domain model (`src/NzbDrone.Core/Parser/Model/TorrentInfo.cs`) and `ReleaseResourceMapper.ToResource` never copies them onto the resource it serializes. Included here anyway as a deliberate *addition* beyond the Prowlarr-shaped subset — `oxidarr_core::Release` already carries this per-release ratio data, and a client deciding whether a private-tracker grab is worth its hit-and-run risk benefits from it being on the wire even though real Prowlarr never puts it there |
+///
+/// `Age`/`AgeHours`/`AgeMinutes` are skipped entirely (not even as `None`):
+/// they are computed properties on real Prowlarr's `ReleaseInfo`
+/// (`DateTime.UtcNow.Subtract(PublishDate)`, evaluated at serialization
+/// time), not stored data — reproducing them would mean either running that
+/// same clock-dependent computation here (making every response's JSON
+/// depend on wall-clock time at render, not just at fetch, with no test
+/// value) or reporting a value frozen at fetch time under a name that
+/// promises otherwise. Neither is an honest subset, so both are left out.
+/// `id`, `Files`, `SubGroup`, `ReleaseHash`, `SortTitle`, `ImdbId`/`TmdbId`/
+/// `TvdbId`/`TvMazeId`, `CommentUrl`, `PosterUrl`, `IndexerFlags`,
+/// `InfoHash`, `Protocol`, `FileName`, and `DownloadClientId` are omitted for
+/// the same reason [`ApplicationResource`]'s own doc comment gives for its
+/// own omissions: no consumer here needs Prowlarr's Angular UI shape, only a
+/// human or this plan's own client reading the JSON directly.
+///
+/// Serializes only (no `Deserialize`) — unlike [`IndexerResource`]/
+/// [`ApplicationResource`], nothing in this crate ever reads a
+/// `ReleaseResource` back in as a request body.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseResource {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guid: Option<String>,
+    pub title: String,
+    pub size: u64,
+    pub seeders: Option<u32>,
+    pub leechers: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub info_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub magnet_url: Option<String>,
+    pub indexer_id: i32,
+    pub indexer: String,
+    pub categories: Vec<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publish_date: Option<String>,
+    pub grabs: Option<u32>,
+    pub download_volume_factor: f32,
+    pub upload_volume_factor: f32,
+}
+
+impl ReleaseResource {
+    /// Builds a `ReleaseResource` from one normalised [`Release`], attaching
+    /// the `indexer_id`/`indexer_name` of the indexer it was fetched from —
+    /// see this type's own doc comment for the exact field mapping.
+    #[must_use]
+    pub fn from_release(release: Release, indexer_id: i32, indexer_name: &str) -> Self {
+        Self {
+            guid: None,
+            title: release.title,
+            size: release.size.unwrap_or(0),
+            seeders: release.seeders,
+            leechers: release.leechers,
+            info_url: release.details_url,
+            download_url: release.download_url,
+            magnet_url: release.magnet_url,
+            indexer_id,
+            indexer: indexer_name.to_string(),
+            categories: release.categories,
+            publish_date: release
+                .publish_date
+                .map(|date| date.to_rfc3339_opts(SecondsFormat::Secs, true)),
+            grabs: release.grabs,
+            download_volume_factor: release.download_volume_factor,
+            upload_volume_factor: release.upload_volume_factor,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+
+    use chrono::{DateTime, Utc};
 
     use super::*;
 
@@ -338,6 +437,57 @@ mod tests {
                 },
             ])
         );
+    }
+
+    #[test]
+    fn release_resource_from_release_carries_the_attached_indexer_identity() {
+        let mut release = Release::default();
+        release.title = "Some.Show.S01E01".to_string();
+        release.seeders = Some(12);
+
+        let resource = ReleaseResource::from_release(release, 7, "My Indexer");
+
+        assert_eq!(resource.indexer_id, 7);
+        assert_eq!(resource.indexer, "My Indexer");
+        assert_eq!(resource.title, "Some.Show.S01E01");
+        assert_eq!(resource.seeders, Some(12));
+    }
+
+    #[test]
+    fn release_resource_guid_is_always_none() {
+        // See this type's own doc comment: `Release` carries no raw `<guid>`
+        // of its own to report here.
+        let resource = ReleaseResource::from_release(Release::default(), 1, "Indexer");
+        assert_eq!(resource.guid, None);
+    }
+
+    #[test]
+    fn release_resource_defaults_a_missing_size_to_zero_not_null() {
+        let resource = ReleaseResource::from_release(Release::default(), 1, "Indexer");
+        assert_eq!(resource.size, 0);
+    }
+
+    #[test]
+    fn release_resource_formats_publish_date_as_rfc3339_with_a_z_suffix() {
+        let published = DateTime::parse_from_rfc3339("2026-09-06T12:34:56+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut release = Release::default();
+        release.publish_date = Some(published);
+
+        let resource = ReleaseResource::from_release(release, 1, "Indexer");
+
+        assert_eq!(
+            resource.publish_date.as_deref(),
+            Some("2026-09-06T12:34:56Z")
+        );
+    }
+
+    #[test]
+    fn release_resource_publish_date_is_omitted_from_json_when_absent() {
+        let resource = ReleaseResource::from_release(Release::default(), 1, "Indexer");
+        let json = serde_json::to_string(&resource).unwrap();
+        assert!(!json.contains("publishDate"), "json was: {json}");
     }
 
     #[test]

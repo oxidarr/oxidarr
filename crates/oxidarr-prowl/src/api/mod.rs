@@ -33,9 +33,15 @@
 //! sibling: same shape, `ApplicationRepo` in place of `IndexerRepo`. Later
 //! tasks in this plan add further sibling modules (sync) alongside it.
 //!
+//! [`search`] — `GET /api/v1/search`, the multi-indexer search endpoint: the
+//! first module here that fans a single request out across more than one
+//! indexer concurrently, reusing [`crate::server::search_row`]'s
+//! row-to-[`oxidarr_indexer::Indexer`] construction rather than
+//! reimplementing it a second time.
+//!
 //! [`dto`] — Prowlarr-shaped response DTOs shared by more than one endpoint
-//! here; [`indexer_schema`], [`indexers`], and [`applications`] all build on
-//! it.
+//! here; [`indexer_schema`], [`indexers`], [`applications`], and [`search`]
+//! all build on it.
 //!
 //! # Shared error mapping
 //!
@@ -48,6 +54,7 @@ pub mod applications;
 pub mod dto;
 pub mod indexer_schema;
 pub mod indexers;
+pub mod search;
 pub mod system;
 
 use axum::Router;
@@ -79,7 +86,8 @@ where
     let v1 = system::router(start_time)
         .merge(indexer_schema::router(state.defs.clone()))
         .merge(indexers::router(state.clone()))
-        .merge(applications::router(state))
+        .merge(applications::router(state.clone()))
+        .merge(search::router(state))
         .layer(middleware::from_fn_with_state(key, require_api_key));
     Router::new().nest("/api/v1", v1)
 }

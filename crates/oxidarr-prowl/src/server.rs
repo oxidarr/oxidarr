@@ -366,7 +366,13 @@ where
 /// unparseable `baseUrl` row setting, or the search call itself — is
 /// collapsed to its `Display` text as a plain `String`, since every one of
 /// them renders through the same `300` error path in [`search_response`].
-async fn search_row<C>(
+///
+/// `pub(crate)` (not private) so [`crate::api::search`]'s multi-indexer `GET
+/// /api/v1/search` endpoint can build the exact same [`Indexer`] this
+/// router's own `t=search`/`t=tvsearch`/`t=movie` dispatch does, off a row it
+/// read itself — the one indexer-construction path this crate has, not two
+/// that could silently drift apart.
+pub(crate) async fn search_row<C>(
     row: &IndexerRow,
     defs: &DefinitionStore,
     client: C,
