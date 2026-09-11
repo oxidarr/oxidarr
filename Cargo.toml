@@ -59,6 +59,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # dev/test
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
