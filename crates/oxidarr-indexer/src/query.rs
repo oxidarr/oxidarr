@@ -11,7 +11,7 @@ use oxidarr_cardigann::template::Scope;
 ///
 /// Derives `Default` because login flows build a [`Scope`] via [`scope_for`]
 /// before any actual search query exists, e.g. `scope_for(def,
-/// &SearchQuery::default(), s)`.
+/// &SearchQuery::default(), s, &[])`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SearchQuery {
     /// A free-text query string.
@@ -73,10 +73,23 @@ impl Settings {
 /// Builds the [`Scope`] a definition's templates render against for one
 /// search: `.Config.*` from `s`'s resolved settings, `.Keywords` and
 /// `.Query.Keywords` as the raw (unsplit, unlowercased) query string,
-/// `.Query.Q` likewise, and `.Query.IMDBID`/`.Query.Season`/`.Query.Ep` from
+/// `.Query.Q` likewise, `.Query.IMDBID`/`.Query.Season`/`.Query.Ep` from
 /// the matching `SearchQuery` field — each an empty string when its field is
 /// absent, matching the "unset variable renders empty" convention used
-/// throughout this crate's template scopes.
+/// throughout this crate's template scopes — and `.Categories` from
+/// `mapped_categories`.
+///
+/// `mapped_categories` is `def`'s TRACKER-id category list for this search
+/// (already translated from `q.categories`' Newznab ids and defaults-
+/// fallen-back, via `oxidarr_indexer::builder`'s private `mapped_categories`
+/// helper — not this module's `q.categories` directly), matching Jackett's
+/// and Prowlarr's own `variables[".Categories"] = mappedCategories;`. A
+/// caller with no notion of a category-scoped search (`login`'s two call
+/// sites, which always use `SearchQuery::default()`) passes an empty slice:
+/// real Jackett's `GetBaseTemplateVariables` — the login-time equivalent —
+/// never sets `.Categories` at all, so an empty list renders the same as
+/// "unset" for every corpus template (none reference `.Categories` from a
+/// login block).
 ///
 /// `.Keywords`/`.Query.Keywords` are the raw query text, not
 /// [`SearchQuery::keywords`]'s lowercased/whitespace-split tokens.
@@ -95,7 +108,12 @@ impl Settings {
 /// Jackett applies separately (`query.MatchQueryStringAND`, same file,
 /// ~line 2458), which is out of this task's scope.
 #[must_use]
-pub fn scope_for(def: &Definition, q: &SearchQuery, s: &Settings) -> Scope {
+pub fn scope_for(
+    def: &Definition,
+    q: &SearchQuery,
+    s: &Settings,
+    mapped_categories: &[String],
+) -> Scope {
     let mut scope = Scope::new();
 
     for (key, value) in s.resolved(def) {
@@ -112,7 +130,7 @@ pub fn scope_for(def: &Definition, q: &SearchQuery, s: &Settings) -> Scope {
         &q.season.map(|s| s.to_string()).unwrap_or_default(),
     );
     scope.set_query("Ep", &q.episode.map(|e| e.to_string()).unwrap_or_default());
-    scope.set_categories(q.categories.iter().map(std::string::ToString::to_string));
+    scope.set_categories(mapped_categories.iter().cloned());
 
     scope
 }
@@ -176,7 +194,7 @@ search:
             ..SearchQuery::default()
         };
 
-        let scope = scope_for(&def, &query, &settings);
+        let scope = scope_for(&def, &query, &settings, &[]);
 
         assert_eq!(
             render("{{ .Config.sort }}-{{ .Query.Q }}", &scope).unwrap(),
@@ -187,7 +205,7 @@ search:
     #[test]
     fn scope_for_defaults_query_variables_to_empty_when_absent() {
         let def = definition_with_sort_setting();
-        let scope = scope_for(&def, &SearchQuery::default(), &Settings::default());
+        let scope = scope_for(&def, &SearchQuery::default(), &Settings::default(), &[]);
 
         assert_eq!(
             render(
@@ -200,13 +218,36 @@ search:
     }
 
     #[test]
+    fn scope_for_binds_categories_from_the_mapped_categories_argument_not_the_query() {
+        // scope_for takes the already-translated tracker-id list, not
+        // `q.categories` (Newznab ids) — see the doc comment and
+        // `oxidarr_indexer::builder`'s `mapped_categories` for where that
+        // translation happens. A query with Newznab categories set still
+        // renders whatever tracker ids `mapped_categories` was given, not
+        // those Newznab ids.
+        let def = definition_with_sort_setting();
+        let query = SearchQuery {
+            categories: vec![5030],
+            ..SearchQuery::default()
+        };
+        let mapped = vec!["6".to_string(), "12".to_string()];
+
+        let scope = scope_for(&def, &query, &Settings::default(), &mapped);
+
+        assert_eq!(
+            render("{{ join .Categories \",\" }}", &scope).unwrap(),
+            "6,12"
+        );
+    }
+
+    #[test]
     fn scope_for_mirrors_the_raw_query_into_keywords_and_query_keywords() {
         let def = definition_with_sort_setting();
         let query = SearchQuery {
             q: Some("Big Buck Bunny".to_string()),
             ..SearchQuery::default()
         };
-        let scope = scope_for(&def, &query, &Settings::default());
+        let scope = scope_for(&def, &query, &Settings::default(), &[]);
 
         assert_eq!(
             render("{{ .Keywords }}|{{ .Query.Keywords }}", &scope).unwrap(),
@@ -225,7 +266,7 @@ search:
             q: Some("Big  Buck\tBunny".to_string()),
             ..SearchQuery::default()
         };
-        let scope = scope_for(&def, &query, &Settings::default());
+        let scope = scope_for(&def, &query, &Settings::default(), &[]);
 
         assert_eq!(
             render("{{ .Keywords }}", &scope).unwrap(),

@@ -1,0 +1,34 @@
+id: example
+name: Example Tracker
+links:
+  - https://example.org/
+caps:
+  categorymappings:
+    - {id: "6", cat: Movies/HD, desc: "Movies HD"}
+    - {id: "9", cat: TV/SD, desc: "TV SD"}
+  modes:
+    search: [q]
+    tv-search: [q, season, ep]
+search:
+  paths:
+    - path: browse
+  inputs:
+    q: "{{ .Query.Q }}"
+    season: "{{ .Query.Season }}"
+    ep: "{{ .Query.Ep }}"
+    imdbid: "{{ .Query.IMDBID }}"
+  rows:
+    selector: tr.result
+  fields:
+    title:
+      selector: td.name a
+    details:
+      selector: td.name a
+      attribute: href
+    download:
+      selector: td.dl a
+      attribute: href
+    seeders:
+      selector: td.seeds
+    leechers:
+      selector: td.leech

@@ -10,7 +10,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::client::{HttpClient, HttpRequest, HttpResponse, Method};
 use crate::error::HttpError;
@@ -34,8 +34,16 @@ struct State {
 /// arrives with no expectations left, fails loudly with
 /// [`HttpError::Transport`] rather than silently returning a default
 /// response — tests should never mistake an unexpected call for a 404.
+///
+/// `Clone`: the shared state lives behind an `Arc`, so every clone
+/// observes the same expectations/requests as the original — needed by any
+/// consumer (e.g. `oxidarr-prowl`'s Torznab router) whose `axum` `State`
+/// requires its client type to be `Clone`, where a naive per-clone-fresh
+/// state would silently desync the clone actually handling a request from
+/// the handle a test asserts against afterwards.
+#[derive(Clone)]
 pub struct FakeClient {
-    state: Mutex<State>,
+    state: Arc<Mutex<State>>,
 }
 
 impl FakeClient {
@@ -43,10 +51,10 @@ impl FakeClient {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            state: Mutex::new(State {
+            state: Arc::new(Mutex::new(State {
                 expectations: VecDeque::new(),
                 requests: Vec::new(),
-            }),
+            })),
         }
     }
 

@@ -17,6 +17,7 @@ chrono = { workspace = true }
 reqwest = { workspace = true }
 scraper = { workspace = true }
 quick-xml = { workspace = true }
+encoding_rs = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

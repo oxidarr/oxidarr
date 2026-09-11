@@ -40,6 +40,9 @@ pub struct HttpRequest {
     pub headers: Vec<(String, String)>,
     /// The request body, if any.
     pub body: Option<Body>,
+    /// Whether the client should follow HTTP redirects (301/302/303/307/308)
+    /// for this request rather than returning the redirect response as-is.
+    pub follow_redirects: bool,
 }
 
 /// The result of executing an [`HttpRequest`].
@@ -95,10 +98,28 @@ mod tests {
             url: "https://t.example/login".parse().unwrap(),
             headers: vec![],
             body: None,
+            follow_redirects: true,
         };
         let resp = client.execute(req).await.unwrap();
         assert_eq!(resp.status, 200);
         assert_eq!(client.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fake_client_carries_follow_redirects_through_requests() {
+        let client = FakeClient::new().expect(
+            |r| !r.follow_redirects,
+            ok_html("https://t.example/no-follow", "<html/>"),
+        );
+        let req = HttpRequest {
+            method: Method::Get,
+            url: "https://t.example/no-follow".parse().unwrap(),
+            headers: vec![],
+            body: None,
+            follow_redirects: false,
+        };
+        client.execute(req).await.unwrap();
+        assert!(!client.requests()[0].follow_redirects);
     }
 
     #[tokio::test]
@@ -109,6 +130,7 @@ mod tests {
             url: "https://t.example/surprise".parse().unwrap(),
             headers: vec![],
             body: None,
+            follow_redirects: true,
         };
         assert!(matches!(
             client.execute(req).await,

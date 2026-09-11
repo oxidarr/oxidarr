@@ -18,20 +18,32 @@
 //!
 //! # Known limitations
 //!
-//! - A definition's `followredirect` field is parsed but not honoured:
-//!   requests always follow redirects, regardless of what the definition
-//!   declares.
+//! - A search path's `followredirect` is honoured (see
+//!   [`client::HttpRequest::follow_redirects`] and [`builder`]'s mapping),
+//!   defaulting to following when the key is absent. A definition's
+//!   top-level `followredirect` (distinct from each path's own) is still
+//!   parsed but not consulted: login requests always follow redirects
+//!   regardless of what it declares (see [`login::authenticate`]).
 //! - `t=caps` (indexer capability negotiation, including category mappings)
 //!   is not fetched or modelled; it lands with the category-mapping
 //!   subsystem.
-//! - Response bodies are decoded as UTF-8 with invalid sequences replaced.
-//!   Definitions that declare a non-UTF-8 page encoding (`windows-1251` and
-//!   similar, roughly 8% of the corpus) are decoded lossily rather than
-//!   through their declared encoding.
+//! - Search bodies are decoded per the definition's declared `encoding`;
+//!   login pages are not yet — see [`login::authenticate`]'s doc comment.
+//! - A `details`/`download` field extracted as a relative URL (e.g.
+//!   `href="/details/1"`) is stored on [`Release::details_url`]/
+//!   [`Release::download_url`] verbatim — see
+//!   `oxidarr_cardigann::engine::build_release` — and served the same way
+//!   all the way out through `oxidarr-prowl`'s rendered Torznab feed (see
+//!   that crate's own doc comment). Nothing in this crate absolutizes it
+//!   against the tracker's base URL. Absolutizing is a prerequisite for the
+//!   next milestone's grab acceptance (Sonarr/Radarr resolve a feed's `link`/
+//!   `comments` relative to the *feed's own* URL, which is this instance's
+//!   Torznab endpoint, not the tracker's).
 
 pub mod builder;
 pub mod cardigann;
 pub mod client;
+mod decode;
 pub mod error;
 pub mod indexer;
 pub mod login;

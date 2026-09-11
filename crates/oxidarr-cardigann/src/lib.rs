@@ -3,6 +3,8 @@
 //! Parses and executes Prowlarr-compatible Cardigann YAML definitions (schema v11).
 //! The network client is injected, so the engine is testable against fixtures.
 
+pub mod categories;
+pub mod catmap;
 pub mod engine;
 pub mod error;
 pub mod filters;

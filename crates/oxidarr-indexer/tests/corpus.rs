@@ -5,7 +5,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use oxidarr_cardigann::model::{Search, SearchPath, parse_definition};
+use oxidarr_cardigann::catmap::CategoryMap;
+use oxidarr_cardigann::model::{Definition, Search, SearchPath, parse_definition};
 use oxidarr_indexer::{Method, SearchQuery, Settings, build_search_requests};
 
 /// Locates `.definitions/v11` by walking up from the crate directory.
@@ -54,16 +55,39 @@ fn corpus_is_present_and_large() {
     );
 }
 
+/// Mirrors `oxidarr_indexer::builder`'s private `mapped_categories`: `def`'s
+/// TRACKER-id category list for `q` — `CategoryMap::to_tracker(q.categories)`,
+/// falling back to `def`'s `default: true`-flagged tracker ids when that
+/// translation is empty (Jackett's/Prowlarr's `if (mappedCategories.Count ==
+/// 0) mappedCategories = DefaultCategories;`; see the task report's source
+/// citation and `builder.rs`'s `mapped_categories` doc comment for the
+/// full explanation). This gate's representative query always has empty
+/// `q.categories`, so this always resolves to `def`'s defaults (or nothing,
+/// for the handful of corpus definitions — e.g. `totheglory.yml` — that
+/// declare no `caps.categorymappings` at all).
+fn mapped_categories(def: &Definition, q: &SearchQuery) -> Vec<String> {
+    let map = CategoryMap::from_definition(def);
+    let mapped = map.to_tracker(&q.categories);
+    if mapped.is_empty() {
+        map.defaults().to_vec()
+    } else {
+        mapped
+    }
+}
+
 /// Mirrors `oxidarr_indexer::builder`'s private `effective_paths`/
 /// `is_reachable` closely enough to pair each [`SearchPath`] with the
 /// [`oxidarr_indexer::HttpRequest`] `build_search_requests` built from it,
 /// in the same order — needed only so this gate can tell, per produced
 /// request, whether *that* path declares any inputs at all (see
-/// `every_definition_builds_search_requests` below). `q.categories` is
-/// always empty in this gate's representative query, so every path is
-/// always reachable; the categories filter is kept anyway so this stays a
-/// faithful mirror rather than a check that happens to work for one query.
-fn effective_reachable_paths(search: &Search, q: &SearchQuery) -> Vec<SearchPath> {
+/// `every_definition_builds_search_requests` below). `path.categories` is a
+/// list of TRACKER ids (taken straight from `caps.categorymappings.id`, not
+/// Newznab ids — verified against the real corpus; see `builder.rs`'s
+/// module doc and the task report), so this compares against `mapped`
+/// (already translated), not `q.categories` directly.
+fn effective_reachable_paths(def: &Definition, q: &SearchQuery) -> Vec<SearchPath> {
+    let search = &def.search;
+    let mapped = mapped_categories(def, q);
     let paths: Vec<SearchPath> = if search.paths.is_empty() {
         search
             .path
@@ -75,7 +99,7 @@ fn effective_reachable_paths(search: &Search, q: &SearchQuery) -> Vec<SearchPath
                     inputs: BTreeMap::new(),
                     categories: Vec::new(),
                     response: None,
-                    followredirect: false,
+                    followredirect: None,
                 }]
             })
             .unwrap_or_default()
@@ -86,10 +110,8 @@ fn effective_reachable_paths(search: &Search, q: &SearchQuery) -> Vec<SearchPath
         .into_iter()
         .filter(|path| {
             path.categories.is_empty()
-                || q.categories.is_empty()
-                || q.categories
-                    .iter()
-                    .any(|c| path.categories.iter().any(|pc| *pc == c.to_string()))
+                || mapped.is_empty()
+                || mapped.iter().any(|m| path.categories.contains(m))
         })
         .collect()
 }
@@ -111,7 +133,7 @@ fn merged_inputs(search: &Search, path: &SearchPath) -> BTreeMap<String, String>
 /// defect re-check below, so both apply exactly the same assertions.
 fn check_requests(
     def_path: &Path,
-    search: &Search,
+    def: &Definition,
     q: &SearchQuery,
     requests: &[oxidarr_indexer::HttpRequest],
     failures: &mut Vec<String>,
@@ -121,7 +143,8 @@ fn check_requests(
         return;
     }
 
-    let paths = effective_reachable_paths(search, q);
+    let search = &def.search;
+    let paths = effective_reachable_paths(def, q);
     for (i, req) in requests.iter().enumerate() {
         if req.url.host().is_none() {
             failures.push(format!(
@@ -233,7 +256,7 @@ fn every_definition_builds_search_requests() {
                 patched.search.paths.retain(|p| !p.path.contains(signature));
                 match build_search_requests(&patched, &q, &settings) {
                     Ok(requests) => {
-                        check_requests(&def_path, &patched.search, &q, &requests, &mut failures);
+                        check_requests(&def_path, &patched, &q, &requests, &mut failures);
                     }
                     Err(err) => failures.push(format!(
                         "{}: known-defect path removed, but the remaining paths still \
@@ -245,7 +268,7 @@ fn every_definition_builds_search_requests() {
             }
         };
 
-        check_requests(&def_path, &def.search, &q, &requests, &mut failures);
+        check_requests(&def_path, &def, &q, &requests, &mut failures);
     }
 
     assert!(total > 500, "expected 500+ definitions, found {total}");

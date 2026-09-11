@@ -160,14 +160,21 @@ pub enum Filter {
     ///
     /// The optional argument is Cardigann's `andmatch` character limit
     /// (`args: 50` in `torrentlt.yml`, `deildu.yml`, `backups.yml`): per
-    /// Jackett's `TorznabQuery.MatchQueryStringAND` (the real engine behind
-    /// `CardigannIndexer.cs`'s `andmatch` case — Prowlarr copied the case
-    /// label but never wired the limit through, an open defect tracked as
-    /// Prowlarr/Prowlarr#1270), the limit truncates the search's keywords
-    /// (joined with a space) to their first N characters BEFORE splitting
-    /// back into words — it bounds *which* keywords must match, not *where*
-    /// in the row's text a keyword must appear. `None` when the argument is
+    /// Jackett's `TorznabQuery.MatchQueryStringAND` (`TorznabQuery.cs`
+    /// lines 217-243 — the real engine behind `CardigannIndexer.cs`'s
+    /// `andmatch` case; Prowlarr copied the case label but never wired the
+    /// limit through, an open defect tracked as Prowlarr/Prowlarr#1270),
+    /// the limit truncates the search's keywords (joined with a space) to
+    /// their first N characters BEFORE splitting back into words (lines
+    /// 226-236) — it bounds *which* keywords must match, not *where* in
+    /// the row's text a keyword must appear. `None` when the argument is
     /// absent or fails to parse as a non-negative integer.
+    ///
+    /// The split result is then filtered (line 238) to drop fragments of
+    /// `Length <= 1` and the three common words `and`/`the`/`an`
+    /// (case-insensitive, see [`AND_MATCH_STOP_WORDS`]) — that filter sits
+    /// on the split itself, not inside the limit branch, so it applies the
+    /// same way whether or not a limit argument is present.
     AndMatch(Option<usize>),
     /// Splits the input on a separator and keeps one indexed part.
     Split {
@@ -343,6 +350,12 @@ pub fn apply(
     }))
 }
 
+/// The common words Jackett's `MatchQueryStringAND` excludes from the
+/// required keyword set (`TorznabQuery.cs` line 219:
+/// `var commonWords = new[] { "and", "the", "an" };`), compared
+/// case-insensitively (line 238's `commonWords.ContainsIgnoreCase(p)`).
+const AND_MATCH_STOP_WORDS: [&str; 3] = ["and", "the", "an"];
+
 /// Implements Cardigann's `andmatch`: keeps the row only if every one of
 /// `ctx.keywords` appears case-insensitively somewhere in `input`; an empty
 /// keyword list (no active search, e.g. an RSS feed poll) always keeps the
@@ -353,10 +366,16 @@ pub fn apply(
 /// space, in `ctx.keywords`'s order) to their first `limit` characters
 /// before re-splitting them on non-word runs — see the `AndMatch` doc
 /// comment for why this mirrors Jackett's `MatchQueryStringAND` rather than
-/// bounding where in `input` a keyword must appear. A `limit` of `0`, or one
-/// that truncates away every keyword, leaves nothing left to require, so
-/// the row is kept — matching .NET LINQ's `Enumerable.All` returning `true`
-/// on an empty sequence.
+/// bounding where in `input` a keyword must appear.
+///
+/// Whatever the split produces (whole keyword list, or the limit-truncated
+/// scope) is then filtered the same way Jackett's own split result is
+/// (`TorznabQuery.cs` line 238): fragments of length `1` or less, and the
+/// [`AND_MATCH_STOP_WORDS`], are dropped from the required set before the
+/// `All` check runs. A `limit` of `0`, or one that truncates away every
+/// non-stop-word keyword, leaves nothing left to require, so the row is
+/// kept — matching .NET LINQ's `Enumerable.All` returning `true` on an
+/// empty sequence.
 fn and_match(input: &str, ctx: &FilterCtx, limit: Option<usize>) -> FilterOutcome {
     if ctx.keywords.is_empty() {
         return FilterOutcome::Value(input.to_string());
@@ -371,7 +390,12 @@ fn and_match(input: &str, ctx: &FilterCtx, limit: Option<usize>) -> FilterOutcom
     let input_lower = input.to_lowercase();
     let all_present = scope
         .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|part| !part.is_empty())
+        .filter(|part| {
+            part.chars().count() > 1
+                && !AND_MATCH_STOP_WORDS
+                    .iter()
+                    .any(|word| word.eq_ignore_ascii_case(part))
+        })
         .all(|part| input_lower.contains(&part.to_lowercase()));
 
     if all_present {
@@ -1029,6 +1053,76 @@ mod tests {
         assert_eq!(
             run_outcome("andmatch", &["not-a-number"], "Ubuntu 24.04 Desktop", &ctx),
             FilterOutcome::DropRow
+        );
+    }
+
+    #[test]
+    fn andmatch_drops_stop_words_and_single_character_fragments() {
+        // Mirrors Jackett's `MatchQueryStringAND` (`TorznabQuery.cs` lines
+        // 217-243): after splitting the (possibly truncated) query string
+        // on non-word runs, fragments with `Length <= 1` and the three
+        // common words ("and", "the", "an", case-insensitive) are excluded
+        // from the required set (line 238). That filter sits on the split
+        // result itself, not inside the `limit is > 0` branch (lines
+        // 226-234), so it applies whether or not a limit argument is
+        // present — pinned here both ways.
+        let mut ctx = FilterCtx::fixed_for_tests();
+        ctx.keywords = vec!["the".into(), "ubuntu".into(), "a".into()];
+
+        // No limit: "the" and "a" are excluded, leaving only "ubuntu"
+        // required, so a title missing both "the" and "a" still matches.
+        assert_eq!(
+            run_outcome("andmatch", &[], "Ubuntu 24.04 Desktop", &ctx),
+            FilterOutcome::Value("Ubuntu 24.04 Desktop".into())
+        );
+
+        // A limit wide enough to cover the whole joined keyword string
+        // behaves identically: the filtering is not limit-specific.
+        assert_eq!(
+            run_outcome("andmatch", &["50"], "Ubuntu 24.04 Desktop", &ctx),
+            FilterOutcome::Value("Ubuntu 24.04 Desktop".into())
+        );
+    }
+
+    #[test]
+    fn andmatch_stop_word_filtering_does_not_hide_a_real_missing_keyword() {
+        // Guards against a filter that (wrongly) drops everything: with a
+        // genuine non-stop-word keyword absent from the title, the row
+        // must still be dropped.
+        let mut ctx = FilterCtx::fixed_for_tests();
+        ctx.keywords = vec!["the".into(), "ubuntu".into(), "server".into()];
+        assert_eq!(
+            run_outcome("andmatch", &[], "Ubuntu 24.04 Desktop", &ctx),
+            FilterOutcome::DropRow
+        );
+    }
+
+    #[test]
+    fn andmatch_stop_word_check_is_case_insensitive() {
+        // `ctx.keywords` normally arrive lowercased already (the engine's
+        // `SearchQuery::keywords` lowercases them), but `and_match` must
+        // not rely on that: an uppercase stop word must still be excluded.
+        let mut ctx = FilterCtx::fixed_for_tests();
+        ctx.keywords = vec!["AND".into(), "Ubuntu".into()];
+        assert_eq!(
+            run_outcome("andmatch", &[], "ubuntu server", &ctx),
+            FilterOutcome::Value("ubuntu server".into())
+        );
+    }
+
+    #[test]
+    fn andmatch_keeps_every_row_when_every_keyword_is_a_stop_word() {
+        // Regression pin, no production change: when the required set
+        // collapses entirely to stop words, the filtered set is empty and
+        // `.all()` vacuously returns `true` for every row — mirroring
+        // Jackett's `QueryStringParts.All(title.ContainsIgnoreCase)` on an
+        // empty `QueryStringParts`. An arbitrary title with none of these
+        // words present must still be kept.
+        let mut ctx = FilterCtx::fixed_for_tests();
+        ctx.keywords = vec!["the".into(), "an".into(), "and".into()];
+        assert_eq!(
+            run_outcome("andmatch", &[], "Completely Unrelated Title", &ctx),
+            FilterOutcome::Value("Completely Unrelated Title".into())
         );
     }
 

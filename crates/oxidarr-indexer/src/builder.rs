@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use oxidarr_cardigann::catmap::CategoryMap;
 use oxidarr_cardigann::model::{Definition, Search, SearchPath};
 use oxidarr_cardigann::template::{self, Scope};
 use url::Url;
@@ -17,12 +18,25 @@ use crate::query::{SearchQuery, Settings, scope_for};
 
 /// Builds one [`HttpRequest`] per reachable entry in `def.search.paths`.
 ///
-/// A path is reachable when it declares no `categories:` restriction, when
-/// `q.categories` is empty, or when the two lists intersect — Prowlarr's
-/// simplified gating rule, not Jackett's own (which additionally maps
-/// Newznab category ids through `caps.categorymappings` before comparing;
-/// that mapping layer is out of scope here, so `q.categories` is compared
-/// directly against `path.categories` as decimal strings).
+/// `q.categories` (Newznab ids) is translated into `def`'s tracker-id space
+/// via [`mapped_categories`] *before* anything else: that translated list —
+/// not the raw Newznab query — is what both path reachability ([`is_reachable`])
+/// and the `.Categories` scope variable ([`scope_for`]) consume.
+///
+/// A path's own `categories:` (a list of TRACKER ids, taken straight from
+/// `caps.categorymappings.id` — verified against the real corpus, e.g.
+/// `diablotorrent.yml`, `1ptbar.yml`, `haitang.yml`, where every path-level
+/// `categories:` entry is one of that same file's `categorymappings.id`
+/// values; see the task report) is reachable when it declares no
+/// restriction, when the translated list is empty — nothing to filter with,
+/// mirroring Prowlarr's `CardigannRequestGenerator.GetRequest`, which guards
+/// its per-path intersection check on the mapped list being non-empty — or
+/// when the two tracker-id lists intersect. This replaces an earlier
+/// simplification that compared `q.categories` directly against
+/// `path.categories` as raw Newznab-shaped decimal strings — verified wrong
+/// by both the corpus (path categories are tracker ids, not Newznab ids)
+/// and Jackett's/Prowlarr's own source (both intersect the same tracker-id
+/// space; see the task report's citation).
 ///
 /// Every reachable path renders against the *same* [`Scope`], built once via
 /// [`scope_for`] — a path's `categories:` restriction does not narrow
@@ -68,14 +82,53 @@ pub fn build_search_requests(
     q: &SearchQuery,
     s: &Settings,
 ) -> Result<Vec<HttpRequest>, IndexerError> {
-    let scope = scope_for(def, q, s);
+    let mapped = mapped_categories(def, q);
+    let scope = scope_for(def, q, s, &mapped);
     let base = base_url(def)?;
 
     effective_paths(&def.search)
         .iter()
-        .filter(|path| is_reachable(path, q))
+        .filter(|path| is_reachable(path, &mapped))
         .map(|path| build_request(def, &def.search, path, &base, &scope))
         .collect()
+}
+
+/// Translates `q.categories` (Newznab ids) into `def`'s tracker-space
+/// category ids via [`CategoryMap::to_tracker`] (parent-expanding: a
+/// top-level block id also reaches every tracker id mapped under it — see
+/// `CategoryMap`'s module docs), falling back to `def`'s `default:
+/// true`-flagged tracker ids when that translation is empty.
+///
+/// Mirrors Jackett's and Prowlarr's `PerformQuery`/`GetRequest` exactly:
+///
+/// ```csharp
+/// var mappedCategories = MapTorznabCapsToTrackers(query);
+/// if (mappedCategories.Count == 0)
+/// {
+///     mappedCategories = DefaultCategories;
+/// }
+/// ```
+///
+/// (`CardigannIndexer.cs` ~1461-1464; `CardigannRequestGenerator.cs`
+/// ~1074-1077 — byte-identical logic in both engines). The fallback fires
+/// on an empty *result*, not on an empty *query*: a non-empty `q.categories`
+/// that happens to match none of `def`'s categorymappings falls back to the
+/// same defaults a wholly empty query would (pinned by
+/// `a_non_empty_query_that_maps_to_nothing_falls_back_to_defaults_exactly_like_an_empty_query`
+/// in this module's tests) — there is no separate "no reachable
+/// category-gated paths" case for that scenario in either real engine.
+///
+/// Computed once per search so [`is_reachable`] and [`scope_for`]'s
+/// `.Categories` value agree on the same list, the way both engines share
+/// one `mappedCategories` variable for both purposes.
+fn mapped_categories(def: &Definition, q: &SearchQuery) -> Vec<String> {
+    let map = CategoryMap::from_definition(def);
+    let mapped = map.to_tracker(&q.categories);
+    if mapped.is_empty() {
+        map.defaults().to_vec()
+    } else {
+        mapped
+    }
 }
 
 /// `search.paths`, or — when that list is empty — a single-element list
@@ -95,7 +148,7 @@ fn effective_paths(search: &Search) -> Vec<SearchPath> {
                 inputs: BTreeMap::new(),
                 categories: Vec::new(),
                 response: None,
-                followredirect: false,
+                followredirect: None,
             }]
         })
         .unwrap_or_default()
@@ -130,14 +183,20 @@ fn base_url(def: &Definition) -> Result<Url, IndexerError> {
     resolve_base_url(def).map_err(|reason| request_build_error(def, reason))
 }
 
-/// Whether `path` should be included for a search with `q`'s categories.
-fn is_reachable(path: &SearchPath, q: &SearchQuery) -> bool {
-    if path.categories.is_empty() || q.categories.is_empty() {
+/// Whether `path` should be included, given `mapped` — the tracker-space
+/// category ids [`mapped_categories`] computed for this search.
+///
+/// A path with no `categories:` restriction is always reachable. Otherwise
+/// reachable when `mapped` is empty (nothing to filter with — see
+/// [`mapped_categories`]'s doc comment for why this can happen even after
+/// its own defaults fallback, e.g. a definition with no
+/// `caps.categorymappings` at all) or when the two tracker-id lists
+/// intersect.
+fn is_reachable(path: &SearchPath, mapped: &[String]) -> bool {
+    if path.categories.is_empty() || mapped.is_empty() {
         return true;
     }
-    q.categories
-        .iter()
-        .any(|c| path.categories.iter().any(|pc| *pc == c.to_string()))
+    mapped.iter().any(|m| path.categories.contains(m))
 }
 
 /// Overlays `path.inputs` onto `search.inputs`, path winning on collision.
@@ -180,6 +239,25 @@ fn render_input(
     Ok(RenderedInput::Pair(key.to_string(), rendered))
 }
 
+/// Builds one [`HttpRequest`] for `path`.
+///
+/// `path.followredirect` maps straight onto [`HttpRequest::follow_redirects`],
+/// defaulting to `true` when the key is absent from the definition — not
+/// Jackett's own default. Jackett's HTTP client disables auto-redirect
+/// globally (`AllowAutoRedirect = false`, `HttpWebClient2.cs`) and only
+/// follows a search path's redirect when `SearchPath.Followredirect` is
+/// explicitly `true` (`CardigannIndexer.cs`, guarding every
+/// `FollowIfRedirect` call for a search response on `response.IsRedirect &&
+/// SearchPath.Followredirect`); the corpus confirms this is opt-in — of the
+/// 21 `followredirect` occurrences across `.definitions/v11`, every single
+/// one sets `true`, none ever sets `false`. Defaulting an *absent* key to
+/// `false` here would therefore flip this crate's pre-Task-6 behaviour
+/// (`ReqwestClient` always followed every redirect unconditionally) to
+/// "never follow unless declared" for the entire rest of the corpus that
+/// never mentions the key — a real regression risk this task deliberately
+/// avoids by keeping the always-follow default and only opting a path *out*
+/// via an explicit `followredirect: false` (see the task report for the
+/// full citation and the corpus survey command).
 fn build_request(
     def: &Definition,
     search: &Search,
@@ -270,6 +348,7 @@ fn build_request(
         url,
         headers,
         body,
+        follow_redirects: path.followredirect.unwrap_or(true),
     })
 }
 
@@ -313,7 +392,14 @@ search:
     #[test]
     fn minimal_get_definition_renders_query_pairs_from_inputs() {
         let def = parse(MINIMAL);
-        let q = query("ubuntu", vec![200]);
+        // MINIMAL declares no `caps.categorymappings`, so translation always
+        // yields nothing (no entries to translate to, no `default: true`
+        // fallback either) — see `no_categorymapping_definition_...` below
+        // for that behaviour pinned as its own test. `cat` renders empty and
+        // is dropped by `render_input`'s empty-input rule, so this fixture
+        // is queried with no categories at all: this test's actual subject
+        // is BTreeMap input ordering, not category translation.
+        let q = query("ubuntu", vec![]);
 
         let requests = build_search_requests(&def, &q, &Settings::default()).unwrap();
 
@@ -321,12 +407,7 @@ search:
         let req = &requests[0];
         assert_eq!(req.method, Method::Get);
         assert_eq!(req.body, None);
-        // BTreeMap-ordered inputs ("cat" < "q"), not the brief's illustrative
-        // "q" then "cat" — see the task report.
-        assert_eq!(
-            req.url.as_str(),
-            "https://example.org/browse?cat=200&q=ubuntu"
-        );
+        assert_eq!(req.url.as_str(), "https://example.org/browse?q=ubuntu");
     }
 
     const POST_DEF: &str = r#"
@@ -364,7 +445,129 @@ search:
         );
     }
 
-    const TWO_PATHS: &str = r#"
+    // Tracker "1" -> Movies (2000, top-level, default: true).
+    // Tracker "2" -> TV/SD (5030, a child of TV/5000, not default).
+    // Tracker "3" -> TV (5000, the bare top-level block, not default).
+    // Mirrors the real corpus shape (e.g. `diablotorrent.yml`,
+    // `1ptbar.yml`): path-level `categories:` lists are TRACKER ids drawn
+    // straight from `categorymappings.id`, not Newznab ids — see the task
+    // report's Jackett/Prowlarr source citation for why.
+    const CATEGORY_DEF: &str = r#"
+id: example
+name: Example
+links:
+  - https://example.org/
+caps:
+  categorymappings:
+    - {id: "1", cat: Movies, desc: "Movies", default: true}
+    - {id: "2", cat: TV/SD, desc: "TV SD"}
+    - {id: "3", cat: TV, desc: "TV block only"}
+search:
+  paths:
+    - path: browse
+    - path: movies
+      categories: ["1"]
+    - path: tv
+      categories: ["2"]
+    - path: tv-block-only
+      categories: ["3"]
+  inputs:
+    q: "{{ .Keywords }}"
+    cat: "{{ join .Categories \",\" }}"
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+"#;
+
+    fn paths_of(requests: &[HttpRequest]) -> Vec<&str> {
+        requests.iter().map(|r| r.url.path()).collect()
+    }
+
+    #[test]
+    fn a_top_level_newznab_query_expands_to_every_tracker_id_mapped_under_it() {
+        // Querying the parent block (5000, TV) must reach a path gated on a
+        // tracker id mapped to *any* of its children (tv, tracker "2" ->
+        // 5030) as well as one mapped to the bare block itself (tv-block-
+        // only, tracker "3" -> 5000) — `CategoryMap::to_tracker`'s parent
+        // expansion (Task 2), exercised end to end through request
+        // building. "movies" (tracker "1" -> 2000, an unrelated top-level
+        // block) must NOT be reached.
+        let def = parse(CATEGORY_DEF);
+        let q = query("ubuntu", vec![5000]);
+
+        let requests = build_search_requests(&def, &q, &Settings::default()).unwrap();
+
+        let mut paths = paths_of(&requests);
+        paths.sort_unstable();
+        assert_eq!(paths, vec!["/browse", "/tv", "/tv-block-only"]);
+        // `.Categories` carries the TRANSLATED tracker ids ("2", "3"), not
+        // the raw queried Newznab id (5000) — the core contract of this
+        // task. Same scope is shared by every path (see `build_request`'s
+        // doc comment), so any reachable request's `cat` shows it.
+        let browse = requests.iter().find(|r| r.url.path() == "/browse").unwrap();
+        assert_eq!(browse.url.query(), Some("cat=2%2C3&q=ubuntu"));
+    }
+
+    #[test]
+    fn a_subcategory_newznab_query_does_not_reach_a_path_gated_on_a_block_only_tracker_mapping() {
+        // Mirrors `catmap`'s one-directional rule end to end: querying the
+        // child (5030, TV/SD) reaches "tv" (tracker "2" -> 5030 exactly)
+        // but NOT "tv-block-only" (tracker "3" -> bare 5000), since
+        // `to_tracker` never expands a child query to a parent-only
+        // mapping.
+        let def = parse(CATEGORY_DEF);
+        let q = query("ubuntu", vec![5030]);
+
+        let requests = build_search_requests(&def, &q, &Settings::default()).unwrap();
+
+        let mut paths = paths_of(&requests);
+        paths.sort_unstable();
+        assert_eq!(paths, vec!["/browse", "/tv"]);
+    }
+
+    #[test]
+    fn an_empty_query_falls_back_to_default_flagged_tracker_ids() {
+        // Mirrors Jackett's/Prowlarr's `PerformQuery`/`GetRequest`: `if
+        // (mappedCategories.Count == 0) mappedCategories =
+        // DefaultCategories;` (see the task report for the source
+        // citation). An empty query maps to nothing, so `.Categories`
+        // becomes the definition's `default: true`-flagged tracker ids
+        // ("1" only) — "movies" (gated on "1") is reached, "tv" and
+        // "tv-block-only" (gated on non-default ids) are not.
+        let def = parse(CATEGORY_DEF);
+        let q = query("ubuntu", vec![]);
+
+        let requests = build_search_requests(&def, &q, &Settings::default()).unwrap();
+
+        let mut paths = paths_of(&requests);
+        paths.sort_unstable();
+        assert_eq!(paths, vec!["/browse", "/movies"]);
+    }
+
+    #[test]
+    fn a_non_empty_query_that_maps_to_nothing_falls_back_to_defaults_exactly_like_an_empty_query() {
+        // The brief's working assumption was that an empty *translation* of
+        // a non-empty query should behave differently from a genuinely
+        // empty query (no reachable gated paths at all). Verified against
+        // Jackett's and Prowlarr's actual source: both key the
+        // `DefaultCategories` fallback purely off `mappedCategories.Count
+        // == 0`, with no distinction for why it's empty — a query for a
+        // Newznab id this definition never maps (8000, Other) behaves
+        // identically to an empty query. See the task report for the two
+        // source citations.
+        let def = parse(CATEGORY_DEF);
+        let q = query("ubuntu", vec![8000]);
+
+        let requests = build_search_requests(&def, &q, &Settings::default()).unwrap();
+
+        let mut paths = paths_of(&requests);
+        paths.sort_unstable();
+        assert_eq!(paths, vec!["/browse", "/movies"]);
+    }
+
+    const NO_CATEGORYMAPPINGS_DEF: &str = r#"
 id: example
 name: Example
 links:
@@ -372,8 +575,8 @@ links:
 search:
   paths:
     - path: browse
-    - path: xxx
-      categories: ["600"]
+    - path: gated
+      categories: ["1000"]
   inputs:
     q: "{{ .Keywords }}"
   rows:
@@ -384,34 +587,28 @@ search:
 "#;
 
     #[test]
-    fn a_category_gated_path_is_excluded_when_query_categories_do_not_intersect() {
-        let def = parse(TWO_PATHS);
-        let q = query("ubuntu", vec![200]);
+    fn a_gated_path_is_reachable_regardless_of_query_when_the_definition_declares_no_categorymappings()
+     {
+        // Real corpus case (`totheglory.yml`): a definition with no
+        // `caps.categorymappings` at all, so translation is always empty
+        // AND there is no `default: true` id to fall back to either —
+        // `mapped_categories` stays empty no matter what's queried.
+        // Prowlarr's `CardigannRequestGenerator.GetRequest` guards its
+        // per-path Intersect/Except check with `mappedCategories.Count >
+        // 0`, so an empty `mappedCategories` skips category filtering
+        // entirely rather than excluding every gated path — every path
+        // (gated or not) is reachable. (Jackett's own `CardigannIndexer`
+        // lacks that extra guard and would exclude the gated path instead;
+        // this crate follows Prowlarr, the actual compatibility target —
+        // see the task report.)
+        let def = parse(NO_CATEGORYMAPPINGS_DEF);
+        let q = query("ubuntu", vec![2000]);
 
         let requests = build_search_requests(&def, &q, &Settings::default()).unwrap();
 
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].url.path(), "/browse");
-    }
-
-    #[test]
-    fn a_category_gated_path_is_included_when_query_categories_intersect() {
-        let def = parse(TWO_PATHS);
-        let q = query("ubuntu", vec![600]);
-
-        let requests = build_search_requests(&def, &q, &Settings::default()).unwrap();
-
-        assert_eq!(requests.len(), 2);
-    }
-
-    #[test]
-    fn a_category_gated_path_is_included_when_query_categories_are_empty() {
-        let def = parse(TWO_PATHS);
-        let q = query("ubuntu", vec![]);
-
-        let requests = build_search_requests(&def, &q, &Settings::default()).unwrap();
-
-        assert_eq!(requests.len(), 2);
+        let mut paths = paths_of(&requests);
+        paths.sort_unstable();
+        assert_eq!(paths, vec!["/browse", "/gated"]);
     }
 
     const BAD_BASE: &str = r#"
@@ -465,11 +662,18 @@ search:
         assert!(matches!(err, IndexerError::RequestBuild { .. }));
     }
 
+    // Tracker "1" -> Movies (2000), tracker "2" -> TV/SD (5030): both exact,
+    // unambiguous matches (no parent expansion in play) so the queried
+    // Newznab ids translate one-for-one to these tracker ids.
     const RAW_DEF: &str = r#"
 id: example
 name: Example
 links:
   - https://example.org/
+caps:
+  categorymappings:
+    - {id: "1", cat: Movies, desc: "Movies"}
+    - {id: "2", cat: TV/SD, desc: "TV SD"}
 search:
   paths:
     - path: browse
@@ -486,7 +690,7 @@ search:
     #[test]
     fn raw_input_is_appended_verbatim_to_the_query_string() {
         let def = parse(RAW_DEF);
-        let q = query("ubuntu", vec![200, 300]);
+        let q = query("ubuntu", vec![2000, 5030]);
 
         let requests = build_search_requests(&def, &q, &Settings::default()).unwrap();
 
@@ -494,9 +698,11 @@ search:
         // Normal pairs are appended first, then raw fragments verbatim
         // (including the trailing "&" the range template itself produces) —
         // see build_request's doc comment for why raw is handled last.
+        // `.Categories` carries the translated tracker ids ("1", "2"), not
+        // the queried Newznab ids (2000, 5030).
         assert_eq!(
             requests[0].url.as_str(),
-            "https://example.org/browse?q=ubuntu&c200=1&c300=1&"
+            "https://example.org/browse?q=ubuntu&c1=1&c2=1&"
         );
     }
 
@@ -505,6 +711,10 @@ id: example
 name: Example
 links:
   - https://example.org/
+caps:
+  categorymappings:
+    - {id: "1", cat: Movies, desc: "Movies"}
+    - {id: "2", cat: TV/SD, desc: "TV SD"}
 search:
   paths:
     - path: takelogin.php
@@ -526,9 +736,10 @@ search:
         // and folds them into the very same collection used for the POST
         // body (CardigannIndexer.cs's PerformQuery, ~line 1531-1544), so
         // dropping it here would issue an unfiltered POST for real
-        // definitions — this proves it doesn't.
+        // definitions — this proves it doesn't. `.Categories` carries the
+        // translated tracker ids ("1", "2"), not the queried Newznab ids.
         let def = parse(RAW_POST_DEF);
-        let q = query("ubuntu", vec![200, 300]);
+        let q = query("ubuntu", vec![2000, 5030]);
 
         let requests = build_search_requests(&def, &q, &Settings::default()).unwrap();
 
@@ -540,8 +751,8 @@ search:
         assert_eq!(
             requests[0].body,
             Some(Body::Form(vec![
-                ("f[]".to_string(), "200".to_string()),
-                ("f[]".to_string(), "300".to_string()),
+                ("f[]".to_string(), "1".to_string()),
+                ("f[]".to_string(), "2".to_string()),
                 ("search".to_string(), "ubuntu".to_string()),
             ]))
         );
@@ -724,6 +935,73 @@ search:
         let requests = build_search_requests(&def, &q, &Settings::default()).unwrap();
 
         assert_eq!(requests[0].url.as_str(), "https://example.org/sub/browse");
+    }
+
+    #[test]
+    fn a_path_with_no_followredirect_key_defaults_to_following_redirects() {
+        // Absent `followredirect` must map to `follow_redirects: true` —
+        // the overwhelming majority of the corpus never declares the key at
+        // all, and pre-Task-6 behaviour always followed redirects
+        // unconditionally; see the task report for the corpus survey and
+        // the Jackett source citations behind this default.
+        let def = parse(MINIMAL);
+        let q = query("ubuntu", vec![]);
+
+        let requests = build_search_requests(&def, &q, &Settings::default()).unwrap();
+
+        assert!(requests[0].follow_redirects);
+    }
+
+    #[test]
+    fn a_path_with_explicit_followredirect_false_disables_following() {
+        let def = parse(
+            r"
+id: example
+name: Example
+links:
+  - https://example.org/
+search:
+  paths:
+    - path: browse
+      followredirect: false
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+",
+        );
+        let q = query("ubuntu", vec![]);
+
+        let requests = build_search_requests(&def, &q, &Settings::default()).unwrap();
+
+        assert!(!requests[0].follow_redirects);
+    }
+
+    #[test]
+    fn a_path_with_explicit_followredirect_true_follows() {
+        let def = parse(
+            r"
+id: example
+name: Example
+links:
+  - https://example.org/
+search:
+  paths:
+    - path: browse
+      followredirect: true
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
+",
+        );
+        let q = query("ubuntu", vec![]);
+
+        let requests = build_search_requests(&def, &q, &Settings::default()).unwrap();
+
+        assert!(requests[0].follow_redirects);
     }
 
     #[test]

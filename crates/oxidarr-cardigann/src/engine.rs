@@ -1,5 +1,6 @@
 //! Executes a definition's `search` block against a response body.
 
+use crate::catmap::CategoryMap;
 use crate::error::CardigannError;
 use crate::filters::{self, FilterCtx, FilterOutcome};
 use crate::model::{Case, Definition, Field};
@@ -53,6 +54,9 @@ pub fn extract(
 
     let doc = Html::parse_document(body);
     let rows_selector = compile_html_selector(&def.search.rows.selector)?;
+    // Built once per `extract()` call, not per row: it only depends on the
+    // definition's `caps.categorymappings`, which never changes across rows.
+    let category_map = CategoryMap::from_definition(def);
 
     let mut out = Vec::new();
     let skip = def.search.rows.after.unwrap_or(0);
@@ -76,7 +80,7 @@ pub fn extract(
             scope.set_result(name, &raw);
             values.insert(name.clone(), raw);
         }
-        out.push(build_release(&values));
+        out.push(build_release(&values, &category_map));
     }
 
     Ok(out)
@@ -269,9 +273,21 @@ fn compile_html_selector(raw: &str) -> Result<selector::CompiledSelector, Cardig
 /// value stays available under `.Result.date` for template references
 /// regardless.
 ///
-/// `categories` is a separate, still-unmapped concern: it needs the
-/// `caps.categorymappings` subsystem, which does not exist yet.
-fn build_release(values: &BTreeMap<String, String>) -> Release {
+/// `categories` comes from the row's `category` field value (the corpus's
+/// only extraction-time category field — surveyed across the full v11
+/// corpus: 517 of 548 definitions declare a `fields.category` (counted via
+/// `yaml.safe_load` over every `.definitions/v11/*.yml`, checking for a
+/// `search.fields.category` key), none declare a second `category2`-style
+/// variant, and no `category` field's filter chain splits its result into
+/// more than one id), resolved through `category_map`
+/// via [`CategoryMap::to_newznab`]. A tracker id with no matching
+/// `categorymappings` row (or a definition with no `caps.categorymappings`
+/// at all) contributes nothing: the row's `categories` stays empty rather
+/// than guessing. The result is sorted and deduplicated so two
+/// `categorymappings` rows that happen to name the same Newznab category
+/// under different tracker ids do not produce a visibly unordered or
+/// duplicated vector.
+fn build_release(values: &BTreeMap<String, String>, category_map: &CategoryMap) -> Release {
     let get = |k: &str| values.get(k).map(String::as_str).unwrap_or_default();
     let non_empty = |k: &str| {
         let v = get(k);
@@ -305,6 +321,10 @@ fn build_release(values: &BTreeMap<String, String>) -> Release {
     release.files = get("files").replace(',', "").parse().ok();
     release.minimum_seed_time = get("minimumseedtime").parse().ok();
     release.minimum_ratio = get("minimumratio").parse().ok();
+    let mut categories = category_map.to_newznab(get("category"));
+    categories.sort_unstable();
+    categories.dedup();
+    release.categories = categories;
     release
 }
 
@@ -640,7 +660,50 @@ search:
         );
         assert!(
             releases[0].categories.is_empty(),
-            "categories are unmapped until caps.categorymappings is implemented"
+            "this definition declares no caps.categorymappings, so its raw category value (\"2000\") has nothing to resolve against"
+        );
+    }
+
+    #[test]
+    fn categories_resolve_through_the_definitions_categorymappings() {
+        // Two rows, two distinct tracker category ids, both mapped by the
+        // definition's own `caps.categorymappings` — the RESULT-level proof
+        // that `build_release` actually wires the row's `category` field
+        // through `CategoryMap::to_newznab`, not just that the plumbing
+        // compiles.
+        let yaml = r#"
+id: simple
+name: Simple
+caps:
+  categorymappings:
+    - {id: "6", cat: Movies/HD, desc: "Movies HD"}
+    - {id: "9", cat: TV/SD, desc: "TV SD"}
+search:
+  rows:
+    selector: tr.result
+  fields:
+    title:
+      selector: td.name
+    category:
+      selector: td.cat
+"#;
+        let html = r#"<table>
+<tr class="result"><td class="name">A</td><td class="cat">6</td></tr>
+<tr class="result"><td class="name">B</td><td class="cat">9</td></tr>
+<tr class="result"><td class="name">C</td><td class="cat">99</td></tr>
+</table>"#;
+        let def = parse_definition(yaml).unwrap();
+        let releases =
+            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
+        assert_eq!(
+            releases[0].categories,
+            vec![2040],
+            "tracker id 6 -> Movies/HD"
+        );
+        assert_eq!(releases[1].categories, vec![5030], "tracker id 9 -> TV/SD");
+        assert!(
+            releases[2].categories.is_empty(),
+            "tracker id 99 has no categorymappings row, so it must contribute nothing"
         );
     }
 

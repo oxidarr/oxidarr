@@ -29,6 +29,7 @@ use oxidarr_core::Release;
 
 use crate::builder::build_search_requests;
 use crate::client::{HttpClient, HttpRequest};
+use crate::decode::decode_body;
 use crate::error::IndexerError;
 use crate::indexer::Indexer;
 use crate::login::{LoginError, authenticate, check_error_rules};
@@ -101,13 +102,18 @@ impl<C: HttpClient> CardigannIndexer<C> {
     /// Executes `req` and, on a 2xx-or-not response body, runs
     /// `def.search.error` rules over it via [`check_error_rules`].
     ///
+    /// The body is decoded per `def.encoding` (via `decode_body`) rather
+    /// than assumed to be UTF-8 — roughly 8% of the corpus declares a
+    /// non-UTF-8 page encoding (`windows-1251` and similar), which a plain
+    /// UTF-8-lossy decode would mangle.
+    ///
     /// # Errors
     /// Returns [`IndexerError::Http`] on a transport failure, or
     /// [`IndexerError::Login`] when an error rule matches (or fails to
     /// compile).
     async fn execute_and_check(&self, req: HttpRequest) -> Result<String, IndexerError> {
         let resp = self.client.execute(req).await?;
-        let body = resp.text().into_owned();
+        let body = decode_body(&resp.body, &self.def.encoding);
         check_error_rules(&self.def.search.error, &body).map_err(IndexerError::Login)?;
         Ok(body)
     }
