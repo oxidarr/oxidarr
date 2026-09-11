@@ -19,11 +19,20 @@ path = "src/main.rs"
 [dependencies]
 oxidarr-core = { workspace = true }
 oxidarr-cardigann = { workspace = true }
+oxidarr-db = { workspace = true }
+oxidarr-http = { workspace = true }
+oxidarr-indexer = { workspace = true }
+axum = { workspace = true }
 quick-xml = { workspace = true }
 chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
-oxidarr-indexer = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
 
 [lints]
 workspace = true

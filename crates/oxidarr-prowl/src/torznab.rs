@@ -90,7 +90,11 @@ pub fn render_caps(def: &Definition, map: &CategoryMap) -> String {
 /// become which `torznab:attr`. A `None`/empty field is omitted entirely
 /// rather than rendered empty, except `download_volume_factor` and
 /// `upload_volume_factor`, which are plain `f32`s (defaulting to `1.0`, per
-/// [`Release::default`]) and are therefore always present.
+/// [`Release::default`]) and are therefore always present. `grabs` is
+/// rendered as its own `torznab:attr`, positioned right after `peers` —
+/// matching the attribute order real Torznab feeds carry it in (see
+/// `oxidarr-indexer`'s `tests/fixtures/torznab_feed.xml`) — when
+/// [`Release::grabs`] is `Some`.
 #[must_use]
 pub fn render_results(releases: &[Release], title: &str) -> String {
     render(|writer| write_results(writer, releases, title))
@@ -311,6 +315,7 @@ fn write_item<W: Write>(writer: &mut Writer<W>, release: &Release) -> io::Result
                     &seeders.saturating_add(leechers).to_string(),
                 )?;
             }
+            write_attr_opt(writer, "grabs", release.grabs.map(|v| v.to_string()))?;
             write_attr_opt(writer, "infohash", release.info_hash.clone())?;
             write_attr_opt(writer, "magneturl", release.magnet_url.clone())?;
             for category in &release.categories {
@@ -489,6 +494,7 @@ search:
         release.size = Some(1_500_000_000);
         release.seeders = Some(120);
         release.leechers = Some(30);
+        release.grabs = Some(15);
         release.details_url = Some("https://example.org/details/1".to_string());
         release.download_url = Some("https://example.org/download/1.torrent".to_string());
         release.magnet_url = Some("magnet:?xt=urn:btih:ABCDEF1234567890".to_string());
@@ -542,6 +548,7 @@ search:
                 r#"<enclosure url="https://example.org/download/1.torrent" length="1500000000" type="application/x-bittorrent"/>"#,
                 r#"<torznab:attr name="seeders" value="120"/>"#,
                 r#"<torznab:attr name="peers" value="150"/>"#,
+                r#"<torznab:attr name="grabs" value="15"/>"#,
                 r#"<torznab:attr name="infohash" value="ABCDEF1234567890"/>"#,
                 r#"<torznab:attr name="magneturl" value="magnet:?xt=urn:btih:ABCDEF1234567890"/>"#,
                 r#"<torznab:attr name="category" value="2040"/>"#,
@@ -572,10 +579,12 @@ search:
     /// `seeders + leechers` per `schemas/torznab.xsd`'s comment on that
     /// attribute, and `parse_feed` inverts it as `peers - seeders`, landing
     /// back on the original `leechers` — see `rss.rs`'s `into_release`) or
-    /// is left at `Release::default()` on both sides: `grabs`, `imdb_id`,
-    /// `tmdb_id`, `tvdb_id`, `minimum_seed_time`, `minimum_ratio`, and
-    /// `files` are real `Release` fields this renderer does not emit at all
-    /// (outside this task's scope per the brief), and `description`,
+    /// is left at `Release::default()` on both sides: `imdb_id`, `tmdb_id`,
+    /// `tvdb_id`, `minimum_seed_time`, `minimum_ratio`, and `files` are real
+    /// `Release` fields this renderer does not emit at all (outside this
+    /// task's scope per the brief) — `grabs` used to be one of these too,
+    /// until it was added in Task 10 per that task's own deferred ruling —
+    /// and `description`,
     /// `poster`, `genre` are fields `parse_feed` itself never populates from
     /// any Torznab/Newznab element (see its own doc comment) — so neither
     /// side of the round trip ever sets them to anything but `None`.

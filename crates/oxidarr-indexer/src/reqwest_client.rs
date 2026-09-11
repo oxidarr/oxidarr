@@ -24,6 +24,15 @@ use crate::error::HttpError;
 /// live with. Because every hop still goes out through this same `client`,
 /// the cookie store/provider applies exactly as it would to any other
 /// request — no separate cookie handling needed for the redirect chain.
+///
+/// `Clone`: `reqwest::Client` wraps its connection pool, cookie store, and
+/// configuration behind an internal `Arc` (see [`HttpClient::execute`]'s own
+/// doc comment, which already relies on this for its per-hop loop), so
+/// cloning a `ReqwestClient` is cheap and every clone shares the same cookie
+/// jar/provider and connection pool rather than getting an independent one —
+/// exactly what a Torznab router needs to hand one client to many concurrent
+/// request handlers.
+#[derive(Clone)]
 pub struct ReqwestClient {
     client: reqwest::Client,
 }
