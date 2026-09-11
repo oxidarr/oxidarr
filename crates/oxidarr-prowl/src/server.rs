@@ -68,11 +68,12 @@ use axum::extract::{Path as PathParam, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use chrono::Utc;
 use oxidarr_cardigann::catmap::CategoryMap;
 use oxidarr_core::Release;
 use oxidarr_core::ids::IndexerId;
 use oxidarr_db::{ConfigRepo, Db, DbError, IndexerKind, IndexerRepo, IndexerRow};
-use oxidarr_http::auth::constant_time_eq;
+use oxidarr_http::auth::{ApiKey, constant_time_eq};
 use oxidarr_indexer::{
     CardigannIndexer, HttpClient, Indexer, NewznabIndexer, SearchQuery, Settings, TorznabIndexer,
 };
@@ -80,6 +81,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use url::Url;
 
+use crate::api::api_router;
 use crate::definitions::DefinitionStore;
 use crate::torznab::{render_caps, render_error, render_results};
 
@@ -156,6 +158,31 @@ where
     Router::new()
         .route("/{indexer_id}/api", get(handle_api::<C>))
         .with_state(state)
+}
+
+/// Builds the whole application: this crate's Torznab router (`GET
+/// /{indexer_id}/api`, above) merged with the auth-wrapped `/api/v1` router
+/// ([`crate::api::api_router`]) — see that module's own docs for the
+/// deliberate asymmetry in how each side reads the instance API key.
+///
+/// Reads [`ConfigRepo::api_key`] once, at call time, to build the
+/// `/api/v1` auth layer's [`ApiKey`] state, and captures `Utc::now()` here
+/// as the `/api/v1/system/status` `startTime` every response after this
+/// call reports (see `crate::api::system::router`'s own `start_time`
+/// parameter for why it's captured once at router-build time rather than
+/// read fresh per request).
+///
+/// # Errors
+///
+/// Returns whatever [`ConfigRepo::api_key`] itself can fail with — a
+/// database unavailable at startup.
+pub async fn app<C>(state: AppState<C>) -> Result<Router, DbError>
+where
+    C: HttpClient + Clone + Send + Sync + 'static,
+{
+    let key = ConfigRepo::new(&state.db).api_key().await?;
+    let v1 = api_router(state.clone(), ApiKey::new(key), Utc::now());
+    Ok(router(state).merge(v1))
 }
 
 async fn handle_api<C>(

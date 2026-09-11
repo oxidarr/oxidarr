@@ -12,11 +12,17 @@
 //! and [`DefinitionStore`], into the actual `GET /{indexer_id}/api` Torznab
 //! endpoint — see its module docs for authentication and error-code
 //! conventions.
+//!
+//! [`api`] mounts the Prowlarr-compatible `/api/v1` control-plane endpoints
+//! behind [`oxidarr_http::auth::require_api_key`]. [`server::app`] merges it
+//! with the Torznab router into the one application this crate serves.
 
+pub mod api;
 pub mod definitions;
 pub mod server;
 pub mod torznab;
 
+pub use api::api_router;
 pub use definitions::{DefinitionError, DefinitionStore};
-pub use server::{AppState, router};
+pub use server::{AppState, app, router};
 pub use torznab::{render_caps, render_error, render_results};
