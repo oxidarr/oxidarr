@@ -287,6 +287,13 @@ async fn submit_login<C: HttpClient>(
             }
             None
         }
+        // Unreachable: this function's only two call sites pass a literal
+        // `Method::Post`/`Method::Get` — `Put`/`Delete` exist solely for
+        // `oxidarr-prowl`'s app-sync engine, which never touches a Cardigann
+        // login flow. Matched exhaustively (rather than a wildcard) so a
+        // future third login method still gets a compile error here instead
+        // of silently falling into this arm.
+        Method::Put | Method::Delete => None,
     };
 
     let req = HttpRequest {

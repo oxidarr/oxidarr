@@ -87,29 +87,60 @@ use crate::torznab::{render_caps, render_error, render_results};
 
 /// Shared state behind the Torznab router.
 ///
-/// Generic over `C` (the HTTP client every indexer search executes through)
-/// so tests can inject [`oxidarr_indexer::testing::FakeClient`] in place of
-/// the real [`oxidarr_indexer::ReqwestClient`]. `db` is `Arc`-wrapped since
-/// [`Db`] itself is not `Clone` and this state is cloned once per request by
+/// Generic over `C` (the HTTP client every indexer search and app-sync call
+/// executes through) so tests can inject
+/// [`oxidarr_indexer::testing::FakeClient`] in place of the real
+/// [`oxidarr_indexer::ReqwestClient`]. `db` is `Arc`-wrapped since [`Db`]
+/// itself is not `Clone` and this state is cloned once per request by
 /// axum's [`State`] extractor.
+///
+/// # Two client fields
+///
+/// `tracker_client` and `app_client` are the same concrete type `C` but
+/// deliberately separate fields, not one shared client: `tracker_client`
+/// carries every request this instance makes *outbound to a tracker*
+/// (the Torznab router's own searches, `GET /api/v1/search`, and `POST
+/// /indexer/test`'s probe), while `app_client` carries every request this
+/// instance makes *outbound to a configured Sonarr/Radarr application*
+/// (`crate::sync`'s app-sync engine, and `POST /applications/test`'s probe).
+/// A production caller wires both to the same [`oxidarr_indexer::ReqwestClient`]
+/// today — the split exists so a test can hand each traffic class its own
+/// [`oxidarr_indexer::testing::FakeClient`] with independent expectations,
+/// rather than one shared queue where a tracker-search expectation and a
+/// Sonarr-sync expectation would have to interleave in call order.
 pub struct AppState<C> {
     /// The database every request looks up its indexer row and the
     /// instance API key in.
     pub db: Arc<Db>,
-    /// The HTTP client indexer searches execute through.
-    pub client: C,
+    /// The HTTP client every tracker-bound request (Torznab searches,
+    /// `POST /indexer/test`) executes through. See the struct docs' "Two
+    /// client fields" section.
+    pub tracker_client: C,
+    /// The HTTP client every application-bound request (`crate::sync`,
+    /// `POST /applications/test`) executes through. See the struct docs'
+    /// "Two client fields" section.
+    pub app_client: C,
     /// The cached Cardigann definition store every `t=caps` and
     /// Cardigann-kind search reads its definition through. See the module
     /// docs' "Definition loading" section.
     pub defs: DefinitionStore,
+    /// This instance's own publicly reachable base URL — e.g.
+    /// `http://oxidarr.local:9696` — used by `crate::sync` to build the
+    /// Torznab `baseUrl` a synced Sonarr/Radarr indexer is pushed with
+    /// (`{external_url}/{indexer_id}`, joined with that application's own
+    /// `apiPath`). Task 9 sources this from instance configuration; every
+    /// test in this crate today pins it to a fixed value.
+    pub external_url: Url,
 }
 
 impl<C: Clone> Clone for AppState<C> {
     fn clone(&self) -> Self {
         Self {
             db: Arc::clone(&self.db),
-            client: self.client.clone(),
+            tracker_client: self.tracker_client.clone(),
+            app_client: self.app_client.clone(),
             defs: self.defs.clone(),
+            external_url: self.external_url.clone(),
         }
     }
 }
@@ -238,7 +269,7 @@ where
                 categories: parse_categories(params.cat.as_deref()),
                 ..SearchQuery::default()
             };
-            search_response(&row, &state.defs, state.client.clone(), &q).await
+            search_response(&row, &state.defs, state.tracker_client.clone(), &q).await
         }
         Some("tvsearch") => {
             let q = SearchQuery {
@@ -248,7 +279,7 @@ where
                 categories: parse_categories(params.cat.as_deref()),
                 ..SearchQuery::default()
             };
-            search_response(&row, &state.defs, state.client.clone(), &q).await
+            search_response(&row, &state.defs, state.tracker_client.clone(), &q).await
         }
         Some("movie") => {
             let q = SearchQuery {
@@ -257,7 +288,7 @@ where
                 categories: parse_categories(params.cat.as_deref()),
                 ..SearchQuery::default()
             };
-            search_response(&row, &state.defs, state.client.clone(), &q).await
+            search_response(&row, &state.defs, state.tracker_client.clone(), &q).await
         }
         Some(other) => xml_response(StatusCode::OK, render_error(202, &no_such_function(other))),
         None => xml_response(StatusCode::OK, render_error(200, "Missing parameter (t)")),

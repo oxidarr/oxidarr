@@ -1320,6 +1320,7 @@ dependencies = [
  "quick-xml",
  "reqwest",
  "scraper",
+ "serde_json",
  "thiserror",
  "tokio",
  "url",

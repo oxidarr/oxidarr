@@ -96,5 +96,6 @@ fn to_resource(id: &str, def: &Definition) -> IndexerResource {
         priority: 25,
         capabilities: IndexerCapabilities { categories },
         fields,
+        sync_error: None,
     }
 }

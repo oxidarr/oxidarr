@@ -131,7 +131,14 @@ fn next_hop(
         303 => (Method::Get, true),
         301 | 302 => match method {
             Method::Post => (Method::Get, true),
-            Method::Get => (Method::Get, false),
+            // `Put`/`Delete` never occur on a Cardigann-driven redirect
+            // chain in practice (they exist only for `oxidarr-prowl`'s
+            // app-sync engine's Sonarr/Radarr calls, which this crate's own
+            // redirect-following logic still applies to for correctness);
+            // RFC 9110 §15.4.2/15.4.3 keep the method for both of them on a
+            // 301/302, unlike the POST-specific browser-compatibility
+            // downgrade above, so they fall in with `Get` here.
+            Method::Get | Method::Put | Method::Delete => (method, false),
         },
         // 307 | 308
         _ => (method, false),
@@ -150,6 +157,8 @@ fn to_reqwest_request(req: &HttpRequest, client: &reqwest::Client) -> reqwest::R
     let method = match req.method {
         Method::Get => reqwest::Method::GET,
         Method::Post => reqwest::Method::POST,
+        Method::Put => reqwest::Method::PUT,
+        Method::Delete => reqwest::Method::DELETE,
     };
     let mut builder = client.request(method, req.url.clone());
     for (name, value) in &req.headers {
@@ -157,6 +166,7 @@ fn to_reqwest_request(req: &HttpRequest, client: &reqwest::Client) -> reqwest::R
     }
     match &req.body {
         Some(Body::Form(pairs)) => builder.form(pairs),
+        Some(Body::Json(value)) => builder.json(value),
         None => builder,
     }
 }
@@ -403,6 +413,18 @@ mod tests {
     }
 
     #[test]
+    fn a_302_after_put_or_delete_preserves_the_method_and_keeps_the_body() {
+        let put_hop = next_hop(302, &loc("/next"), &u("https://t.example/"), Method::Put).unwrap();
+        assert_eq!(put_hop.1, Method::Put);
+        assert!(!put_hop.2);
+
+        let delete_hop =
+            next_hop(302, &loc("/next"), &u("https://t.example/"), Method::Delete).unwrap();
+        assert_eq!(delete_hop.1, Method::Delete);
+        assert!(!delete_hop.2);
+    }
+
+    #[test]
     fn a_missing_location_header_is_none() {
         assert!(next_hop(302, &[], &u("https://t.example/"), Method::Get).is_none());
     }
@@ -435,6 +457,56 @@ mod tests {
         let headers = vec![("location".to_string(), "/next".to_string())];
         let hop = next_hop(302, &headers, &u("https://t.example/a"), Method::Get).unwrap();
         assert_eq!(hop.0.as_str(), "https://t.example/next");
+    }
+
+    #[test]
+    fn converts_put_and_delete_methods() {
+        let client = reqwest::Client::new();
+        let put = HttpRequest {
+            method: Method::Put,
+            url: "https://t.example/api/v3/indexer/7".parse().unwrap(),
+            headers: vec![],
+            body: None,
+            follow_redirects: true,
+        };
+        let delete = HttpRequest {
+            method: Method::Delete,
+            url: "https://t.example/api/v3/indexer/7".parse().unwrap(),
+            headers: vec![],
+            body: None,
+            follow_redirects: true,
+        };
+
+        assert_eq!(
+            to_reqwest_request(&put, &client).build().unwrap().method(),
+            &reqwest::Method::PUT
+        );
+        assert_eq!(
+            to_reqwest_request(&delete, &client)
+                .build()
+                .unwrap()
+                .method(),
+            &reqwest::Method::DELETE
+        );
+    }
+
+    #[test]
+    fn json_body_sets_the_json_content_type_and_serializes_the_value() {
+        let client = reqwest::Client::new();
+        let req = HttpRequest {
+            method: Method::Post,
+            url: "https://t.example/api/v3/indexer".parse().unwrap(),
+            headers: vec![],
+            body: Some(Body::Json(serde_json::json!({"name": "Example"}))),
+            follow_redirects: true,
+        };
+
+        let built = to_reqwest_request(&req, &client).build().unwrap();
+
+        let content_type = built.headers().get("content-type").unwrap();
+        assert_eq!(content_type, "application/json");
+        let body_bytes = built.body().and_then(reqwest::Body::as_bytes).unwrap();
+        assert_eq!(body_bytes, br#"{"name":"Example"}"#);
     }
 
     #[test]

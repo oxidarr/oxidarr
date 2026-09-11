@@ -107,6 +107,16 @@ pub struct IndexerResource {
     pub capabilities: IndexerCapabilities,
     #[serde(default)]
     pub fields: Vec<Field>,
+    /// Not part of real Prowlarr's `IndexerResource` at all — this crate's
+    /// own honest-divergence field, populated only by
+    /// [`crate::api::indexers`]'s create/update handlers when the
+    /// best-effort [`crate::sync`] push those handlers trigger fails.
+    /// `None` (and so omitted from the JSON entirely) on every other
+    /// response, including a successful sync. See [`crate::api::indexers`]'s
+    /// own module docs for why a CRUD write still answers `2xx` when this is
+    /// set, rather than failing the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_error: Option<String>,
 }
 
 /// [`IndexerResource::priority`]'s default when a client's request body
@@ -263,6 +273,12 @@ pub struct ApplicationResource {
     pub sync_level: SyncLevel,
     #[serde(default)]
     pub fields: Vec<Field>,
+    /// Not part of real Prowlarr's `ApplicationResource` — see
+    /// [`IndexerResource::sync_error`]'s own doc comment for the exact same
+    /// honest-divergence rationale, populated here by
+    /// [`crate::api::applications`]'s create/update handlers instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_error: Option<String>,
 }
 
 /// Prowlarr's `ReleaseResource`
@@ -503,6 +519,7 @@ mod tests {
             priority: 25,
             capabilities: IndexerCapabilities::default(),
             fields: Vec::new(),
+            sync_error: None,
         };
         let json = serde_json::to_string(&resource).unwrap();
         assert!(!json.contains("\"id\""), "json was: {json}");

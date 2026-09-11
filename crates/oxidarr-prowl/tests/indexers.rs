@@ -14,9 +14,14 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Utc};
-use oxidarr_db::Db;
+use oxidarr_core::ids::RemoteIndexerId;
+use oxidarr_db::{
+    AppKind, ApplicationRepo, ApplicationRow, ConfigRepo, Db, IndexerKind, IndexerRepo,
+    MappingRepo, MappingRow, NewApplication, NewIndexer, SyncLevel,
+};
 use oxidarr_http::auth::ApiKey;
 use oxidarr_indexer::testing::{FakeClient, ok_html};
+use oxidarr_indexer::{Body as HttpBody, HttpResponse, Method};
 use oxidarr_prowl::{AppState, DefinitionStore, api_router};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -33,10 +38,24 @@ async fn seeded_db() -> Db {
 }
 
 fn state(db: Db, client: FakeClient) -> AppState<FakeClient> {
+    state_with_app_client(db, client, FakeClient::new())
+}
+
+/// Like [`state`], but with an independently-expectation'd `app_client` —
+/// used by this file's app-sync CRUD-trigger tests, which need to assert on
+/// the Sonarr-bound calls those triggers make without interleaving them
+/// with `tracker_client`'s own (usually empty) expectation queue.
+fn state_with_app_client(
+    db: Db,
+    tracker_client: FakeClient,
+    app_client: FakeClient,
+) -> AppState<FakeClient> {
     AppState {
         db: Arc::new(db),
-        client,
+        tracker_client,
+        app_client,
         defs: DefinitionStore::new(definitions_dir()),
+        external_url: "http://oxidarr.local:9696".parse().unwrap(),
     }
 }
 
@@ -48,6 +67,44 @@ fn fixed_start_time() -> DateTime<Utc> {
 
 fn v1_app(db: Db, client: FakeClient) -> Router {
     api_router(state(db, client), ApiKey::new(API_KEY), fixed_start_time())
+}
+
+/// Like [`v1_app`], but with an independently-expectation'd `app_client` —
+/// used by this file's app-sync CRUD-trigger tests below.
+fn v1_app_with_app_client(db: Db, tracker_client: FakeClient, app_client: FakeClient) -> Router {
+    api_router(
+        state_with_app_client(db, tracker_client, app_client),
+        ApiKey::new(API_KEY),
+        fixed_start_time(),
+    )
+}
+
+/// Inserts one `fullSync` Sonarr application, so the CRUD-trigger tests
+/// below have something for their indexer writes to sync into. Returns the
+/// inserted row so a test that needs its id (to build a mapping directly,
+/// bypassing an actual sync push) can use it without a separate lookup.
+async fn seed_full_sync_application(db: &Db) -> ApplicationRow {
+    ApplicationRepo::new(db)
+        .insert(&NewApplication {
+            name: "Sonarr Main".to_string(),
+            kind: AppKind::Sonarr,
+            base_url: "http://sonarr.example".to_string(),
+            api_key: "sonarr-key".to_string(),
+            sync_level: SyncLevel::FullSync,
+        })
+        .await
+        .unwrap()
+}
+
+/// A `201 Created`-shaped Sonarr `POST /api/v3/indexer` response carrying
+/// `id`.
+fn sonarr_created(id: i64) -> HttpResponse {
+    HttpResponse {
+        status: 201,
+        headers: vec![],
+        body: json!({"id": id}).to_string().into_bytes(),
+        final_url: "http://sonarr.example/api/v3/indexer".parse().unwrap(),
+    }
 }
 
 fn get(uri: &str) -> Request<Body> {
@@ -363,4 +420,152 @@ async fn a_missing_key_is_rejected_with_a_json_problem_on_list() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let problem = body_json(response).await;
     assert!(problem["message"].is_string(), "body was: {problem}");
+}
+
+/// `POST /api/v1/indexer` with a `fullSync` application already configured:
+/// the create handler's app-sync trigger fires a real `POST
+/// /api/v3/indexer` against that application (proven here by `app_client`'s
+/// own `FakeClient` expectation actually being consumed — an unconsumed or
+/// mismatched expectation would fail this test via `.unwrap()` below), and
+/// the create response itself carries no `syncError` since that push
+/// succeeded.
+#[tokio::test]
+async fn create_triggers_a_sync_push_to_a_fullsync_application_and_reports_no_sync_error() {
+    let db = seeded_db().await;
+    seed_full_sync_application(&db).await;
+    let instance_key = ConfigRepo::new(&db).api_key().await.unwrap();
+    let app_client = FakeClient::new().expect(
+        move |req| {
+            req.method == Method::Post
+                && req.url.as_str() == "http://sonarr.example/api/v3/indexer"
+                && req
+                    .headers
+                    .contains(&("X-Api-Key".to_string(), "sonarr-key".to_string()))
+                && matches!(
+                    &req.body,
+                    Some(HttpBody::Json(value))
+                        if value["implementation"] == "Torznab"
+                            && value["fields"]
+                                .as_array()
+                                .unwrap()
+                                .contains(&json!({"name": "apiKey", "value": instance_key}))
+                )
+        },
+        sonarr_created(7),
+    );
+    let app = v1_app_with_app_client(db, FakeClient::new(), app_client);
+    let body = cardigann_body(
+        "My Indexer",
+        25,
+        true,
+        &json!([{"name": "apiKey", "value": "secret"}]),
+    );
+
+    let response = app
+        .oneshot(json_request("POST", "/api/v1/indexer", &body))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created = body_json(response).await;
+    assert!(
+        created.get("syncError").is_none() || created["syncError"].is_null(),
+        "body was: {created}"
+    );
+}
+
+/// Same trigger, but the application's own Sonarr is unreachable
+/// (`app_client` has no expectations queued, so the very first request it
+/// sees fails with `FakeClient`'s own "unexpected request" transport
+/// error): the create write itself still succeeds (`201`), with the
+/// failure surfaced only in the response's `syncError` field.
+#[tokio::test]
+async fn create_reports_a_sync_error_when_the_application_is_unreachable_but_still_answers_2xx() {
+    let db = seeded_db().await;
+    seed_full_sync_application(&db).await;
+    let app = v1_app_with_app_client(db, FakeClient::new(), FakeClient::new());
+    let body = cardigann_body("My Indexer", 25, true, &json!([]));
+
+    let response = app
+        .oneshot(json_request("POST", "/api/v1/indexer", &body))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created = body_json(response).await;
+    assert!(
+        created["syncError"].as_str().is_some(),
+        "body was: {created}"
+    );
+}
+
+/// `DELETE /api/v1/indexer/{id}`, with a `fullSync` application already
+/// mapping that indexer: the remove handler must issue a real Sonarr
+/// `DELETE /api/v3/indexer/{remote_id}` for it — proving the
+/// snapshot-before-cascade fix (`crate::api::indexers::remove` reads the
+/// mapping via `MappingRepo::for_indexer` *before* `IndexerRepo::delete`
+/// destroys it via `ON DELETE CASCADE`) actually reaches the remote side,
+/// not just the local one `oxidarr-db`'s own cascade tests already cover.
+///
+/// Asserted via `probe.requests()` (a clone of `app_client` taken before it
+/// moves into `AppState`), not only via `FakeClient::expect`'s own
+/// predicate: `remove`'s sync call is best-effort with its outcome
+/// discarded, so an unmatched expectation wouldn't fail this test any other
+/// way — inspecting the actually-recorded requests is what proves the call
+/// really happened.
+#[tokio::test]
+async fn delete_triggers_a_remote_delete_for_a_fullsync_applications_mapped_indexer() {
+    let db = seeded_db().await;
+    let sonarr = seed_full_sync_application(&db).await;
+    let indexer = IndexerRepo::new(&db)
+        .insert(&NewIndexer {
+            name: "My Indexer".to_string(),
+            definition_id: "example".to_string(),
+            kind: IndexerKind::Cardigann,
+            enabled: true,
+            settings: serde_json::Map::new(),
+            priority: 25,
+        })
+        .await
+        .unwrap();
+    MappingRepo::new(&db)
+        .set(MappingRow {
+            app_id: sonarr.id,
+            indexer_id: indexer.id,
+            remote_indexer_id: RemoteIndexerId(42),
+        })
+        .await
+        .unwrap();
+    let app_client = FakeClient::new().expect(
+        |req| {
+            req.method == Method::Delete
+                && req.url.as_str() == "http://sonarr.example/api/v3/indexer/42"
+        },
+        HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: b"{}".to_vec(),
+            final_url: "http://sonarr.example/api/v3/indexer/42".parse().unwrap(),
+        },
+    );
+    let probe = app_client.clone();
+    let router = v1_app_with_app_client(db, FakeClient::new(), app_client);
+
+    let response = router
+        .oneshot(delete(&format!("/api/v1/indexer/{}", indexer.id.0)))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let requests = probe.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "expected exactly one Sonarr call, got {requests:?}"
+    );
+    assert_eq!(requests[0].method, Method::Delete);
+    assert_eq!(
+        requests[0].url.as_str(),
+        "http://sonarr.example/api/v3/indexer/42"
+    );
 }

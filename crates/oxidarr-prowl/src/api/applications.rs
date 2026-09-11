@@ -53,7 +53,11 @@
 //! Builds a raw `GET {baseUrl}/api/v3/system/status` [`HttpRequest`]
 //! carrying an `X-Api-Key: {apiKey}` header, straight off the request
 //! body's `fields[]` (not a persisted row, since this application may not
-//! be saved yet), and executes it through `state.client`. Radarr's own
+//! be saved yet), and executes it through `state.app_client` — this endpoint
+//! probes a configured *application*, not a tracker, so it shares
+//! [`crate::server::AppState`]'s app-bound client with [`crate::sync`]
+//! rather than the tracker-bound one [`crate::api::indexers`]'s own test
+//! endpoint uses; see that type's own "Two client fields" section. Radarr's own
 //! `System/Status` endpoint lives at the identical `/api/v3/system/status`
 //! path (`src/Radarr.Api.V3/System/SystemController.cs` in `Radarr/Radarr`
 //! declares the same `[Route("api/v3/system")]` + `status` action Sonarr
@@ -71,6 +75,20 @@
 //! Prowlarr's `List<ValidationFailure>` (see
 //! [`crate::api::indexers`]'s own module docs for the same documented
 //! divergence on its sibling test endpoint).
+//!
+//! # App-sync trigger
+//!
+//! [`create`] and [`update`] each trigger
+//! [`crate::api::sync_one_and_describe_failure`] (best-effort, against just
+//! the one application being written) after their own database write
+//! succeeds, folding whatever it returns into the response's
+//! [`ApplicationResource::sync_error`] field — see
+//! [`crate::api::indexers`]'s own module docs for the full rationale, shared
+//! verbatim here. `remove` does **not** trigger a sync: deleting an
+//! application already cascades every one of its mapping rows away locally
+//! (see [`oxidarr_db::MappingRepo`]'s own cascade tests), and there is no
+//! honest use in calling back out to an application this instance is in the
+//! middle of forgetting about.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -85,7 +103,7 @@ use serde_json::Value;
 use url::Url;
 
 use crate::api::dto::{ApplicationResource, Field};
-use crate::api::{bad_request, db_error_to_problem};
+use crate::api::{bad_request, db_error_to_problem, sync_one_and_describe_failure};
 use crate::server::AppState;
 
 /// Builds `GET`/`POST /applications`, `GET`/`PUT`/`DELETE
@@ -145,7 +163,9 @@ where
         .insert(&new)
         .await
         .map_err(db_error_to_problem)?;
-    Ok((StatusCode::CREATED, Json(row_to_resource(&row))))
+    let mut resource = row_to_resource(&row);
+    resource.sync_error = sync_one_and_describe_failure(&state, &row).await;
+    Ok((StatusCode::CREATED, Json(resource)))
 }
 
 async fn update<C>(
@@ -173,7 +193,9 @@ where
         .update(&row)
         .await
         .map_err(db_error_to_problem)?;
-    Ok(Json(row_to_resource(&row)))
+    let mut resource = row_to_resource(&row);
+    resource.sync_error = sync_one_and_describe_failure(&state, &row).await;
+    Ok(Json(resource))
 }
 
 async fn remove<C>(
@@ -197,7 +219,7 @@ async fn test<C>(
 where
     C: HttpClient + Clone + Send + Sync + 'static,
 {
-    run_test(&resource, state.client.clone()).await?;
+    run_test(&resource, state.app_client.clone()).await?;
     Ok(Json(Vec::new()))
 }
 
@@ -268,6 +290,7 @@ fn row_to_resource(row: &ApplicationRow) -> ApplicationResource {
         implementation: implementation_from_kind(row.kind).to_string(),
         sync_level: row.sync_level,
         fields: row_to_fields(row),
+        sync_error: None,
     }
 }
 

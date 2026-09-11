@@ -16,13 +16,24 @@
 //! [`api`] mounts the Prowlarr-compatible `/api/v1` control-plane endpoints
 //! behind [`oxidarr_http::auth::require_api_key`]. [`server::app`] merges it
 //! with the Torznab router into the one application this crate serves.
+//!
+//! [`sync`] is the app-sync engine: it pushes this instance's enabled
+//! indexers into a configured Sonarr/Radarr application as Torznab
+//! indexers, keyed by [`oxidarr_db::MappingRepo`]'s ownership record rather
+//! than by name-matching. [`api::indexers`] and [`api::applications`]'s
+//! create/update (and, for indexers, delete) handlers trigger it inline,
+//! best-effort, after every write — see [`sync`]'s own module docs for the
+//! full contract and its documented divergence from real Prowlarr's
+//! asynchronous background sync.
 
 pub mod api;
 pub mod definitions;
 pub mod server;
+pub mod sync;
 pub mod torznab;
 
 pub use api::api_router;
 pub use definitions::{DefinitionError, DefinitionStore};
 pub use server::{AppState, app, router};
+pub use sync::{SyncError, SyncReport, sync_all, sync_application};
 pub use torznab::{render_caps, render_error, render_results};

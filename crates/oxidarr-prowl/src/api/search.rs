@@ -243,7 +243,7 @@ where
     let mut tasks = JoinSet::new();
     for row in selected {
         let defs = state.defs.clone();
-        let client = state.client.clone();
+        let client = state.tracker_client.clone();
         let query = query.clone();
         tasks.spawn(async move {
             let id = row.id.0;

@@ -103,8 +103,10 @@ fn app(db: Db, client: FakeClient) -> (Router, FakeClient) {
     let probe = client.clone();
     let state = AppState {
         db: Arc::new(db),
-        client,
+        tracker_client: client,
+        app_client: FakeClient::new(),
         defs: DefinitionStore::new(definitions_dir()),
+        external_url: "http://oxidarr.local:9696".parse().unwrap(),
     };
     (router(state), probe)
 }

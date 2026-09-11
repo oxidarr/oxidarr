@@ -43,8 +43,10 @@ async fn seeded_db() -> Db {
 fn state(db: Db, defs_dir: PathBuf) -> AppState<FakeClient> {
     AppState {
         db: Arc::new(db),
-        client: FakeClient::new(),
+        tracker_client: FakeClient::new(),
+        app_client: FakeClient::new(),
         defs: DefinitionStore::new(defs_dir),
+        external_url: "http://oxidarr.local:9696".parse().unwrap(),
     }
 }
 

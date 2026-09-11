@@ -86,6 +86,35 @@
 //! `400` body correctly. Success (`200 []`) is the shape shared with every
 //! other endpoint in this crate that returns "no items", so that half is not
 //! a divergence.
+//!
+//! # App-sync trigger
+//!
+//! [`create`] and [`update`] each trigger
+//! [`crate::api::sync_all_and_describe_failures`] (best-effort, against
+//! every configured application — an indexer change can affect more than
+//! one) after their own database write succeeds, writing whatever it
+//! returns into the response's [`IndexerResource::sync_error`] field; the
+//! write itself still answers `2xx` even when sync failed. This is a
+//! deliberate divergence from real Prowlarr, whose own sync runs
+//! asynchronously in the background with a separate indexer-health/status
+//! model — this crate settles for one inline best-effort attempt per
+//! write, with the outcome folded into the very same response, rather than
+//! reproducing that machinery.
+//!
+//! [`remove`] cannot use that same `sync_all` trigger: the `app_indexer_map`
+//! table's `indexer_id` column is `ON DELETE CASCADE`, so
+//! `IndexerRepo::delete` erases every mapping naming this indexer
+//! *synchronously*, before any sync call afterward could ever see one to
+//! react to — running `sync_all` post-delete the way `create`/`update` do
+//! would silently never clean up the remote side at all. Instead `remove`
+//! snapshots, for every `fullSync` application, the `(application,
+//! remote_indexer_id)` pairs currently mapping this indexer — via
+//! [`oxidarr_db::MappingRepo::for_indexer`] — *before* calling
+//! `IndexerRepo::delete`, then issues each snapshot's own remote `DELETE`
+//! directly (via [`crate::sync::delete_indexer`]) once the local delete has
+//! succeeded. Every remote delete is best-effort with its outcome discarded,
+//! same as before: a `204 No Content` response has no body to report a
+//! `syncError` on.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -93,7 +122,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use oxidarr_core::ids::IndexerId;
-use oxidarr_db::{IndexerKind, IndexerRepo, IndexerRow, NewIndexer};
+use oxidarr_db::{
+    ApplicationRepo, ApplicationRow, Db, IndexerKind, IndexerRepo, IndexerRow, MappingRepo,
+    NewIndexer, SyncLevel,
+};
 use oxidarr_http::Problem;
 use oxidarr_indexer::{
     CardigannIndexer, HttpClient, Indexer, NewznabIndexer, SearchQuery, Settings, TorznabIndexer,
@@ -102,9 +134,10 @@ use serde_json::Value;
 use url::Url;
 
 use crate::api::dto::{Field, IndexerCapabilities, IndexerResource};
-use crate::api::{bad_request, db_error_to_problem};
+use crate::api::{bad_request, db_error_to_problem, sync_all_and_describe_failures};
 use crate::definitions::DefinitionStore;
 use crate::server::{AppState, settings_from_json};
+use crate::sync;
 
 /// Builds `GET`/`POST /indexer`, `GET`/`PUT`/`DELETE /indexer/{id}`, and
 /// `POST /indexer/test` — relative routes meant to be nested under
@@ -161,7 +194,9 @@ where
         .insert(&new)
         .await
         .map_err(db_error_to_problem)?;
-    Ok((StatusCode::CREATED, Json(row_to_resource(&row))))
+    let mut resource = row_to_resource(&row);
+    resource.sync_error = sync_all_and_describe_failures(&state).await;
+    Ok((StatusCode::CREATED, Json(resource)))
 }
 
 async fn update<C>(
@@ -190,9 +225,15 @@ where
         .update(&row)
         .await
         .map_err(db_error_to_problem)?;
-    Ok(Json(row_to_resource(&row)))
+    let mut resource = row_to_resource(&row);
+    resource.sync_error = sync_all_and_describe_failures(&state).await;
+    Ok(Json(resource))
 }
 
+/// `DELETE /indexer/{id}`. See the module docs' "App-sync trigger" section
+/// for why this snapshots doomed remote mappings *before* deleting the
+/// indexer row, rather than triggering [`sync_all_and_describe_failures`]
+/// afterward the way [`create`]/[`update`] do.
 async fn remove<C>(
     State(state): State<AppState<C>>,
     Path(id): Path<i32>,
@@ -200,11 +241,56 @@ async fn remove<C>(
 where
     C: HttpClient + Clone + Send + Sync + 'static,
 {
+    let indexer_id = IndexerId(id);
+    let doomed = doomed_remote_mappings(&state.db, indexer_id).await;
+
     IndexerRepo::new(&state.db)
-        .delete(IndexerId(id))
+        .delete(indexer_id)
         .await
         .map_err(db_error_to_problem)?;
+
+    for (app, remote_id) in doomed {
+        // Best-effort, outcome discarded — same as `create`/`update`'s own
+        // sync trigger, and for the same reason: a `204 No Content`
+        // response has no body to report a failure on.
+        let _ = sync::delete_indexer(&state.app_client, &app, remote_id).await;
+    }
+
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Snapshots which `fullSync` applications currently map `indexer_id`
+/// remotely, and under what remote id, so [`remove`] can clean up the
+/// remote side *after* deleting the local row. Must run before that
+/// delete: `app_indexer_map.indexer_id` is `ON DELETE CASCADE`, so every
+/// mapping naming `indexer_id` is gone the instant the row is —
+/// [`oxidarr_db::MappingRepo::for_indexer`] would return nothing at all if
+/// called afterward.
+///
+/// `addOnly`/`disabled` applications are excluded: per `crate::sync`'s own
+/// contract, only `fullSync` ever deletes a remote entry, so there is
+/// nothing for `remove` to clean up on their behalf. A failure listing
+/// mappings or applications degrades to "nothing to clean up" (an empty
+/// `Vec`) rather than failing the delete itself — the same best-effort
+/// posture every other sync trigger in this crate takes.
+async fn doomed_remote_mappings(db: &Db, indexer_id: IndexerId) -> Vec<(ApplicationRow, i32)> {
+    let mappings = MappingRepo::new(db)
+        .for_indexer(indexer_id)
+        .await
+        .unwrap_or_default();
+    if mappings.is_empty() {
+        return Vec::new();
+    }
+    let apps = ApplicationRepo::new(db).list().await.unwrap_or_default();
+    mappings
+        .into_iter()
+        .filter_map(|mapping| {
+            apps.iter()
+                .find(|app| app.id == mapping.app_id && app.sync_level == SyncLevel::FullSync)
+                .cloned()
+                .map(|app| (app, mapping.remote_indexer_id.0))
+        })
+        .collect()
 }
 
 async fn test<C>(
@@ -214,7 +300,7 @@ async fn test<C>(
 where
     C: HttpClient + Clone + Send + Sync + 'static,
 {
-    run_test(&resource, &state.defs, state.client.clone()).await?;
+    run_test(&resource, &state.defs, state.tracker_client.clone()).await?;
     Ok(Json(Vec::new()))
 }
 
@@ -301,6 +387,7 @@ fn row_to_resource(row: &IndexerRow) -> IndexerResource {
         priority: row.priority,
         capabilities: IndexerCapabilities::default(),
         fields: fields_from_settings(&row.settings),
+        sync_error: None,
     }
 }
 

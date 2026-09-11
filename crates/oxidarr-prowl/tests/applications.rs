@@ -12,10 +12,10 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Utc};
-use oxidarr_db::Db;
+use oxidarr_db::{ConfigRepo, Db, IndexerKind, IndexerRepo, NewIndexer};
 use oxidarr_http::auth::ApiKey;
 use oxidarr_indexer::testing::FakeClient;
-use oxidarr_indexer::{HttpResponse, Method};
+use oxidarr_indexer::{Body as HttpBody, HttpResponse, Method};
 use oxidarr_prowl::{AppState, DefinitionStore, api_router};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -33,8 +33,10 @@ async fn seeded_db() -> Db {
 fn state(db: Db, client: FakeClient) -> AppState<FakeClient> {
     AppState {
         db: Arc::new(db),
-        client,
+        tracker_client: FakeClient::new(),
+        app_client: client,
         defs: DefinitionStore::new(definitions_dir()),
+        external_url: "http://oxidarr.local:9696".parse().unwrap(),
     }
 }
 
@@ -131,6 +133,34 @@ fn status_response(status: u16) -> HttpResponse {
             .parse()
             .unwrap(),
     }
+}
+
+/// A `201 Created`-shaped Sonarr `POST /api/v3/indexer` response carrying
+/// `id`.
+fn sonarr_created(id: i64) -> HttpResponse {
+    HttpResponse {
+        status: 201,
+        headers: vec![],
+        body: json!({"id": id}).to_string().into_bytes(),
+        final_url: "http://sonarr.example:8989/api/v3/indexer".parse().unwrap(),
+    }
+}
+
+/// Inserts one enabled `Cardigann`-kind indexer, so the app-sync
+/// CRUD-trigger tests below have something for a newly created application
+/// to push.
+async fn seed_enabled_indexer(db: &Db) {
+    IndexerRepo::new(db)
+        .insert(&NewIndexer {
+            name: "My Tracker".to_string(),
+            definition_id: "example".to_string(),
+            kind: IndexerKind::Cardigann,
+            enabled: true,
+            settings: serde_json::Map::new(),
+            priority: 25,
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -538,4 +568,80 @@ async fn a_missing_key_is_rejected_with_a_json_problem_on_list() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let problem = body_json(response).await;
     assert!(problem["message"].is_string(), "body was: {problem}");
+}
+
+/// `POST /api/v1/applications` for a `fullSync` application, with an
+/// enabled indexer already configured: the create handler's app-sync
+/// trigger pushes that indexer into the new application right away (proven
+/// by `client`'s own expectation being consumed), and the create response
+/// carries no `syncError`.
+#[tokio::test]
+async fn create_triggers_a_sync_push_for_the_newly_created_application() {
+    let db = seeded_db().await;
+    seed_enabled_indexer(&db).await;
+    let instance_key = ConfigRepo::new(&db).api_key().await.unwrap();
+    let client = FakeClient::new().expect(
+        move |req| {
+            req.method == Method::Post
+                && req.url.as_str() == "http://sonarr.example:8989/api/v3/indexer"
+                && matches!(
+                    &req.body,
+                    Some(HttpBody::Json(value))
+                        if value["fields"]
+                            .as_array()
+                            .unwrap()
+                            .contains(&json!({"name": "apiKey", "value": instance_key}))
+                )
+        },
+        sonarr_created(9),
+    );
+    let app = v1_app(db, client);
+    let input = application_body(
+        "My Sonarr",
+        "Sonarr",
+        "fullSync",
+        "http://sonarr.example:8989",
+        "secret",
+    );
+
+    let response = app
+        .oneshot(json_request("POST", "/api/v1/applications", &input))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created = body_json(response).await;
+    assert!(
+        created.get("syncError").is_none() || created["syncError"].is_null(),
+        "body was: {created}"
+    );
+}
+
+/// Same trigger, but the new application's own Sonarr is unreachable: the
+/// create write itself still succeeds (`201`), with the failure surfaced
+/// only in `syncError`.
+#[tokio::test]
+async fn create_reports_a_sync_error_when_the_new_application_is_unreachable() {
+    let db = seeded_db().await;
+    seed_enabled_indexer(&db).await;
+    let app = v1_app(db, FakeClient::new());
+    let input = application_body(
+        "My Sonarr",
+        "Sonarr",
+        "fullSync",
+        "http://sonarr.example:8989",
+        "secret",
+    );
+
+    let response = app
+        .oneshot(json_request("POST", "/api/v1/applications", &input))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created = body_json(response).await;
+    assert!(
+        created["syncError"].as_str().is_some(),
+        "body was: {created}"
+    );
 }
