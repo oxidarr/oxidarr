@@ -66,25 +66,49 @@
 use std::collections::BTreeMap;
 
 use oxidarr_cardigann::model::Setting;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Prowlarr's `IndexerResource`, cut to the fields in this module's doc
 /// table.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+///
+/// Deserializes as well as serializes: Task 5's indexer CRUD reuses this
+/// exact shape for `POST`/`PUT /indexer` request bodies, not just
+/// `GET /indexer/schema` responses. `implementation` is a plain `String`
+/// (not `&'static str`, unlike this doc table's Rust-side source) purely so
+/// a client-supplied value can deserialize into it at all; every field a
+/// client might reasonably omit on create (`id`, `description`, `language`,
+/// `enable`, `priority`, `capabilities`, `fields`) carries `#[serde(default)]`
+/// so a partial body still parses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexerResource {
-    #[serde(skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub id: i32,
     pub name: String,
-    pub implementation: &'static str,
+    pub implementation: String,
     pub definition_name: String,
+    #[serde(default)]
     pub description: String,
+    #[serde(default)]
     pub language: String,
+    #[serde(default)]
     pub enable: bool,
+    #[serde(default = "default_priority")]
     pub priority: i32,
+    #[serde(default)]
     pub capabilities: IndexerCapabilities,
+    #[serde(default)]
     pub fields: Vec<Field>,
+}
+
+/// [`IndexerResource::priority`]'s default when a client's request body
+/// omits the field entirely — `IndexerDefinition.Priority`'s own default
+/// (see this module's doc table), matching what
+/// [`crate::api::indexer_schema`] already reports for every not-yet-
+/// configured schema entry.
+const fn default_priority() -> i32 {
+    25
 }
 
 /// Mirrors `RestResource.Id`'s own `JsonIgnoreCondition.WhenWritingDefault`
@@ -100,9 +124,10 @@ fn is_zero(id: &i32) -> bool {
 
 /// Prowlarr's `IndexerCapabilityResource`, cut to `categories` — the only
 /// piece [`crate::api::indexer_schema`] needs.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexerCapabilities {
+    #[serde(default)]
     pub categories: Vec<IndexerCategory>,
 }
 
@@ -112,7 +137,7 @@ pub struct IndexerCapabilities {
 /// [`crate::torznab::render_caps`]'s Torznab XML renders); see
 /// [`crate::api::indexer_schema`]'s module docs for why this endpoint
 /// deliberately flattens that away instead.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexerCategory {
     pub id: u32,
     pub name: String,
@@ -121,16 +146,23 @@ pub struct IndexerCategory {
 /// Prowlarr's `Field` (`Prowlarr.Http.ClientSchema.Field`), cut to the
 /// subset mapped from a Cardigann [`Setting`]. See the module docs' "Field
 /// type mapping" section for `kind`/`value`/`select_options` semantics.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+///
+/// Deserializes as well as serializes — see [`IndexerResource`]'s own doc
+/// comment. Only `name` is required on input: Task 5's write path
+/// (`crate::api::indexers`) reads only `name`/`value` off each `Field` to
+/// build an indexer's settings map, so `label`/`type`/`select_options` all
+/// default when a client omits them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Field {
     pub name: String,
+    #[serde(default)]
     pub label: String,
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     pub kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub value: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub select_options: Option<Vec<SelectOption>>,
 }
 
@@ -184,7 +216,7 @@ fn field_value(setting: &Setting) -> Option<Value> {
 
 /// One `select` field's option, `{value, name}` in Prowlarr's own shape —
 /// see the module docs' "Field type mapping" section.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SelectOption {
     pub value: usize,
     pub name: String,
@@ -272,7 +304,7 @@ mod tests {
         let resource = IndexerResource {
             id: 0,
             name: "Example".to_string(),
-            implementation: "Cardigann",
+            implementation: "Cardigann".to_string(),
             definition_name: "example".to_string(),
             description: String::new(),
             language: String::new(),

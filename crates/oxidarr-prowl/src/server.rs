@@ -308,7 +308,13 @@ fn parse_categories(raw: Option<&str>) -> Vec<u32> {
 /// other JSON type falls back to its compact JSON text — every real
 /// Cardigann `settings:` value is declared/stored as a string, so this
 /// fallback only matters for a value some caller stored non-canonically.
-fn settings_from_json(settings: &serde_json::Map<String, Value>) -> BTreeMap<String, String> {
+///
+/// `pub(crate)` (not private) so [`crate::api::indexers`]'s `POST
+/// /indexer/test` handler can build the same string-valued map from a
+/// request body's settings, rather than duplicating this conversion.
+pub(crate) fn settings_from_json(
+    settings: &serde_json::Map<String, Value>,
+) -> BTreeMap<String, String> {
     settings
         .iter()
         .map(|(key, value)| {

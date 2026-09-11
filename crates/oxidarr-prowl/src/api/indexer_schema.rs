@@ -88,7 +88,7 @@ fn to_resource(id: &str, def: &Definition) -> IndexerResource {
     IndexerResource {
         id: 0,
         name: def.name.clone(),
-        implementation: "Cardigann",
+        implementation: "Cardigann".to_string(),
         definition_name: id.to_string(),
         description: def.description.clone(),
         language: def.language.clone(),
