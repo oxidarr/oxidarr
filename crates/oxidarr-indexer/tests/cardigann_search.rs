@@ -94,10 +94,16 @@ async fn searches_and_extracts_the_fixtures_releases_with_a_valid_session() {
     assert_eq!(releases.len(), 2);
 
     assert_eq!(releases[0].title, "Big.Buck.Bunny.2008.1080p.BluRay.x264");
-    assert_eq!(releases[0].details_url.as_deref(), Some("/details/1"));
+    // Resolved against the search response's `final_url`
+    // ("https://example.org/browse"): the fixture's `href`s are
+    // root-relative paths.
+    assert_eq!(
+        releases[0].details_url.as_deref(),
+        Some("https://example.org/details/1")
+    );
     assert_eq!(
         releases[0].download_url.as_deref(),
-        Some("/download/1.torrent")
+        Some("https://example.org/download/1.torrent")
     );
     assert_eq!(releases[0].seeders, Some(120));
     assert_eq!(releases[0].leechers, Some(7));
@@ -108,10 +114,13 @@ async fn searches_and_extracts_the_fixtures_releases_with_a_valid_session() {
     );
 
     assert_eq!(releases[1].title, "Sintel.2010.720p.WEB-DL.x264");
-    assert_eq!(releases[1].details_url.as_deref(), Some("/details/2"));
+    assert_eq!(
+        releases[1].details_url.as_deref(),
+        Some("https://example.org/details/2")
+    );
     assert_eq!(
         releases[1].download_url.as_deref(),
-        Some("/download/2.torrent")
+        Some("https://example.org/download/2.torrent")
     );
     assert_eq!(releases[1].seeders, Some(45));
     assert_eq!(releases[1].leechers, Some(2));

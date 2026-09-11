@@ -88,9 +88,17 @@ impl<C: HttpClient> CardigannIndexer<C> {
     /// returned immediately. Any other error rule failure (a malformed
     /// selector — [`LoginError::Definition`]) is likewise never retried, and
     /// any transport failure propagates immediately.
-    async fn execute_with_reauth(&self, req: HttpRequest) -> Result<String, IndexerError> {
+    ///
+    /// Returns the decoded body alongside the response's `final_url`
+    /// (post-redirect), which [`search_inner`](Self::search_inner) passes to
+    /// [`extract`] as the base relative `details`/`download`/`poster`
+    /// values are resolved against.
+    async fn execute_with_reauth(
+        &self,
+        req: HttpRequest,
+    ) -> Result<(String, url::Url), IndexerError> {
         match self.execute_and_check(req.clone()).await {
-            Ok(body) => Ok(body),
+            Ok(result) => Ok(result),
             Err(IndexerError::Login(LoginError::Rejected(_))) if self.def.login.is_some() => {
                 authenticate(&self.client, &self.def, &self.settings).await?;
                 self.execute_and_check(req).await
@@ -111,11 +119,14 @@ impl<C: HttpClient> CardigannIndexer<C> {
     /// Returns [`IndexerError::Http`] on a transport failure, or
     /// [`IndexerError::Login`] when an error rule matches (or fails to
     /// compile).
-    async fn execute_and_check(&self, req: HttpRequest) -> Result<String, IndexerError> {
+    async fn execute_and_check(
+        &self,
+        req: HttpRequest,
+    ) -> Result<(String, url::Url), IndexerError> {
         let resp = self.client.execute(req).await?;
         let body = decode_body(&resp.body, &self.def.encoding);
         check_error_rules(&self.def.search.error, &body).map_err(IndexerError::Login)?;
-        Ok(body)
+        Ok((body, resp.final_url))
     }
 
     async fn search_inner(&self, q: &SearchQuery) -> Result<Vec<Release>, IndexerError> {
@@ -131,8 +142,8 @@ impl<C: HttpClient> CardigannIndexer<C> {
 
         let mut releases = Vec::new();
         for req in requests {
-            let body = self.execute_with_reauth(req).await?;
-            releases.extend(extract(&self.def, &body, &config, &ctx)?);
+            let (body, base) = self.execute_with_reauth(req).await?;
+            releases.extend(extract(&self.def, &body, &config, &ctx, &base)?);
         }
         Ok(releases)
     }

@@ -58,18 +58,6 @@
 //! missing or unparseable value is a `300` error) and `"apiKey"` (optional,
 //! forwarded as the indexer's own upstream API key, unrelated to this
 //! instance's own `apikey` query parameter checked above).
-//!
-//! # Known limitations
-//!
-//! A release's `details`/`download` URL is rendered into the feed's
-//! `<comments>`/`<link>`/`<enclosure url>` exactly as
-//! [`oxidarr_indexer`] extracted it — see that crate's own "Known
-//! limitations" doc section. When a tracker's HTML declares that URL as a
-//! bare relative path (e.g. `href="/details/1"`, the shape this router's own
-//! `t=search` test fixture uses), it rides all the way into the response
-//! body unresolved rather than being absolutized against the tracker's base
-//! URL. Absolutizing is a prerequisite for the next milestone's grab
-//! acceptance.
 
 use std::collections::BTreeMap;
 use std::fmt;

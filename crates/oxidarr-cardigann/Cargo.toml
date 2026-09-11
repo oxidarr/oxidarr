@@ -17,6 +17,7 @@ scraper = { workspace = true }
 serde = { workspace = true }
 serde_yaml_ng = { workspace = true }
 thiserror = { workspace = true }
+url = { workspace = true }
 
 [lints]
 workspace = true
