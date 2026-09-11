@@ -13,7 +13,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use oxidarr_db::{ConfigRepo, Db, IndexerKind, IndexerRepo, NewIndexer};
 use oxidarr_indexer::testing::{FakeClient, ok_html};
-use oxidarr_prowl::{AppState, router};
+use oxidarr_prowl::{AppState, DefinitionStore, router};
 use tower::ServiceExt;
 
 /// The Cardigann definition every Cardigann-kind test uses:
@@ -104,7 +104,7 @@ fn app(db: Db, client: FakeClient) -> (Router, FakeClient) {
     let state = AppState {
         db: Arc::new(db),
         client,
-        definitions_dir: definitions_dir(),
+        defs: DefinitionStore::new(definitions_dir()),
     };
     (router(state), probe)
 }

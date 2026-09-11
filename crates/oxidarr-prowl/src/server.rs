@@ -44,12 +44,12 @@
 //!
 //! # Definition loading
 //!
-//! [`load_definition`] reads `<definition_id>.yml` out of
-//! [`AppState::definitions_dir`] and parses it with
-//! [`oxidarr_cardigann::model::parse_definition`] on every `t=caps` and
-//! every Cardigann-kind search — there is no cache. Caching the parsed
-//! [`Definition`] (and the [`CategoryMap`] built from it) is a later
-//! milestone's binary-level concern, not this router's.
+//! [`AppState::defs`] is a [`DefinitionStore`]: every `t=caps` and every
+//! Cardigann-kind search fetches its definition through
+//! [`DefinitionStore::get`], which parses `<definition_id>.yml` only once
+//! per id and caches the result — see that type's own docs for exact cache
+//! semantics (including why `t=caps`'s definition-listing sibling,
+//! `list_ids`, deliberately does not share that cache).
 //!
 //! # Newznab/Torznab row settings
 //!
@@ -61,7 +61,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Router;
@@ -69,9 +68,7 @@ use axum::extract::{Path as PathParam, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use oxidarr_cardigann::CardigannError;
 use oxidarr_cardigann::catmap::CategoryMap;
-use oxidarr_cardigann::model::{Definition, parse_definition};
 use oxidarr_core::Release;
 use oxidarr_core::ids::IndexerId;
 use oxidarr_db::{ConfigRepo, Db, DbError, IndexerKind, IndexerRepo, IndexerRow};
@@ -83,6 +80,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use url::Url;
 
+use crate::definitions::DefinitionStore;
 use crate::torznab::{render_caps, render_error, render_results};
 
 /// Shared state behind the Torznab router.
@@ -98,10 +96,10 @@ pub struct AppState<C> {
     pub db: Arc<Db>,
     /// The HTTP client indexer searches execute through.
     pub client: C,
-    /// Directory Cardigann definition YAML files are read from, keyed by
-    /// `<definition_id>.yml`. See the module docs' "Definition loading"
-    /// section for why there is no cache here.
-    pub definitions_dir: PathBuf,
+    /// The cached Cardigann definition store every `t=caps` and
+    /// Cardigann-kind search reads its definition through. See the module
+    /// docs' "Definition loading" section.
+    pub defs: DefinitionStore,
 }
 
 impl<C: Clone> Clone for AppState<C> {
@@ -109,7 +107,7 @@ impl<C: Clone> Clone for AppState<C> {
         Self {
             db: Arc::clone(&self.db),
             client: self.client.clone(),
-            definitions_dir: self.definitions_dir.clone(),
+            defs: self.defs.clone(),
         }
     }
 }
@@ -121,7 +119,7 @@ impl<C: Clone> Clone for AppState<C> {
 impl<C> fmt::Debug for AppState<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AppState")
-            .field("definitions_dir", &self.definitions_dir)
+            .field("defs", &self.defs)
             .finish_non_exhaustive()
     }
 }
@@ -206,14 +204,14 @@ where
     // `tvsearch`/`movie` request is legal Torznab, so there is no reason to
     // special-case it away here.
     match params.t.as_deref() {
-        Some("caps") => caps_response(&state.definitions_dir, &row.definition_id).await,
+        Some("caps") => caps_response(&state.defs, &row.definition_id).await,
         Some("search") => {
             let q = SearchQuery {
                 q: params.q.clone(),
                 categories: parse_categories(params.cat.as_deref()),
                 ..SearchQuery::default()
             };
-            search_response(&row, &state.definitions_dir, state.client.clone(), &q).await
+            search_response(&row, &state.defs, state.client.clone(), &q).await
         }
         Some("tvsearch") => {
             let q = SearchQuery {
@@ -223,7 +221,7 @@ where
                 categories: parse_categories(params.cat.as_deref()),
                 ..SearchQuery::default()
             };
-            search_response(&row, &state.definitions_dir, state.client.clone(), &q).await
+            search_response(&row, &state.defs, state.client.clone(), &q).await
         }
         Some("movie") => {
             let q = SearchQuery {
@@ -232,7 +230,7 @@ where
                 categories: parse_categories(params.cat.as_deref()),
                 ..SearchQuery::default()
             };
-            search_response(&row, &state.definitions_dir, state.client.clone(), &q).await
+            search_response(&row, &state.defs, state.client.clone(), &q).await
         }
         Some(other) => xml_response(StatusCode::OK, render_error(202, &no_such_function(other))),
         None => xml_response(StatusCode::OK, render_error(200, "Missing parameter (t)")),
@@ -296,58 +294,12 @@ fn settings_from_json(settings: &serde_json::Map<String, Value>) -> BTreeMap<Str
         .collect()
 }
 
-/// Failure loading and parsing `<definition_id>.yml`, distinguishing "the
-/// file could not be read" from "the file was read but is not a valid
-/// Cardigann definition" purely for a clearer [`Display`](fmt::Display).
-#[derive(Debug, thiserror::Error)]
-enum DefinitionError {
-    #[error("reading definition {id:?}: {source}")]
-    Io {
-        id: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("parsing definition {id:?}: {source}")]
-    Parse {
-        id: String,
-        #[source]
-        source: CardigannError,
-    },
-}
-
-/// Reads and parses `<definition_id>.yml` from `dir`. See the module docs'
-/// "Definition loading" section: no caching, by design, for now.
-///
-/// Async (backed by [`tokio::fs::read_to_string`], not [`std::fs`]) since
-/// this runs inline in an async handler on every `t=caps` and every
-/// Cardigann-kind search — a blocking read here would stall the executor
-/// thread it runs on for every other in-flight request.
-///
-/// # Errors
-///
-/// Returns [`DefinitionError::Io`] if the file cannot be read, or
-/// [`DefinitionError::Parse`] if it can be read but does not parse as a
-/// Cardigann v11 definition.
-async fn load_definition(dir: &Path, definition_id: &str) -> Result<Definition, DefinitionError> {
-    let path = dir.join(format!("{definition_id}.yml"));
-    let text = tokio::fs::read_to_string(&path)
-        .await
-        .map_err(|source| DefinitionError::Io {
-            id: definition_id.to_string(),
-            source,
-        })?;
-    parse_definition(&text).map_err(|source| DefinitionError::Parse {
-        id: definition_id.to_string(),
-        source,
-    })
-}
-
-/// Renders `t=caps`: loads `row.definition_id`'s definition and its
-/// [`CategoryMap`], then [`render_caps`]s them. A definition load failure
-/// renders as a `300` error with the failure's own [`Display`](fmt::Display)
-/// text.
-async fn caps_response(definitions_dir: &Path, definition_id: &str) -> Response {
-    match load_definition(definitions_dir, definition_id).await {
+/// Renders `t=caps`: loads `row.definition_id`'s definition (through
+/// [`DefinitionStore::get`]) and its [`CategoryMap`], then [`render_caps`]s
+/// them. A definition load failure renders as a `300` error with the
+/// failure's own [`Display`](fmt::Display) text.
+async fn caps_response(defs: &DefinitionStore, definition_id: &str) -> Response {
+    match defs.get(definition_id).await {
         Ok(def) => {
             let map = CategoryMap::from_definition(&def);
             xml_response(StatusCode::OK, render_caps(&def, &map))
@@ -363,14 +315,14 @@ async fn caps_response(definitions_dir: &Path, definition_id: &str) -> Response 
 /// search itself failing.
 async fn search_response<C>(
     row: &IndexerRow,
-    definitions_dir: &Path,
+    defs: &DefinitionStore,
     client: C,
     q: &SearchQuery,
 ) -> Response
 where
     C: HttpClient,
 {
-    match search_row(row, definitions_dir, client, q).await {
+    match search_row(row, defs, client, q).await {
         Ok(releases) => xml_response(StatusCode::OK, render_results(&releases, &row.name)),
         Err(message) => xml_response(StatusCode::OK, render_error(300, &message)),
     }
@@ -383,7 +335,7 @@ where
 /// them renders through the same `300` error path in [`search_response`].
 async fn search_row<C>(
     row: &IndexerRow,
-    definitions_dir: &Path,
+    defs: &DefinitionStore,
     client: C,
     q: &SearchQuery,
 ) -> Result<Vec<Release>, String>
@@ -392,11 +344,15 @@ where
 {
     match row.kind {
         IndexerKind::Cardigann => {
-            let def = load_definition(definitions_dir, &row.definition_id)
+            let def = defs
+                .get(&row.definition_id)
                 .await
                 .map_err(|err| err.to_string())?;
             let settings = Settings::new(settings_from_json(&row.settings));
-            CardigannIndexer::new(def, settings, client)
+            // `CardigannIndexer::new` takes an owned `Definition`; `def` is
+            // the store's cached `Arc`, so this clones out of it rather
+            // than re-reading/re-parsing the file.
+            CardigannIndexer::new((*def).clone(), settings, client)
                 .search(q)
                 .await
                 .map_err(|err| err.to_string())
