@@ -13,6 +13,7 @@ search:
   paths:
     - path: browse
   inputs:
+    q: "{{ .Query.Q }}"
     season: "{{ .Query.Season }}"
     ep: "{{ .Query.Ep }}"
     imdbid: "{{ .Query.IMDBID }}"

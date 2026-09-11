@@ -275,9 +275,11 @@ fn compile_html_selector(raw: &str) -> Result<selector::CompiledSelector, Cardig
 ///
 /// `categories` comes from the row's `category` field value (the corpus's
 /// only extraction-time category field — surveyed across the full v11
-/// corpus: 549 definitions declare a `fields.category`, none declare a
-/// second `category2`-style variant, and no `category` field's filter chain
-/// splits its result into more than one id), resolved through `category_map`
+/// corpus: 517 of 548 definitions declare a `fields.category` (counted via
+/// `yaml.safe_load` over every `.definitions/v11/*.yml`, checking for a
+/// `search.fields.category` key), none declare a second `category2`-style
+/// variant, and no `category` field's filter chain splits its result into
+/// more than one id), resolved through `category_map`
 /// via [`CategoryMap::to_newznab`]. A tracker id with no matching
 /// `categorymappings` row (or a definition with no `caps.categorymappings`
 /// at all) contributes nothing: the row's `categories` stays empty rather

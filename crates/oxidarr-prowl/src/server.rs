@@ -32,13 +32,15 @@
 //! specifically on a `401`.
 //!
 //! Every other error path in this router — unknown/disabled indexer
-//! (`201`), an unsupported `t` (`203`), a search/definition failure (`300`)
-//! — was not singled out for this same verification, so each keeps the
-//! traditional Newznab/Torznab convention of riding a bare `200`: the error
-//! is self-describing in the XML body, which is what the original spec text
-//! (and every Cardigann-era Torznab client that predates Prowlarr's own
-//! ASP.NET-specific status-code choices) assumes a client checks first,
-//! rather than the HTTP status.
+//! (`201`), a missing `t` (`200`), an unsupported `t` (`202`), a
+//! search/definition failure (`300`) — was not singled out for this same
+//! verification, so each keeps the traditional Newznab/Torznab convention
+//! (200 missing parameter, 202 no such function, per the original spec
+//! text — not the `203` an earlier version of this router shipped) of
+//! riding a bare HTTP `200`: the error is self-describing in the XML body,
+//! which is what the original spec text (and every Cardigann-era Torznab
+//! client that predates Prowlarr's own ASP.NET-specific status-code
+//! choices) assumes a client checks first, rather than the HTTP status.
 //!
 //! # Definition loading
 //!
@@ -56,6 +58,18 @@
 //! missing or unparseable value is a `300` error) and `"apiKey"` (optional,
 //! forwarded as the indexer's own upstream API key, unrelated to this
 //! instance's own `apikey` query parameter checked above).
+//!
+//! # Known limitations
+//!
+//! A release's `details`/`download` URL is rendered into the feed's
+//! `<comments>`/`<link>`/`<enclosure url>` exactly as
+//! [`oxidarr_indexer`] extracted it — see that crate's own "Known
+//! limitations" doc section. When a tracker's HTML declares that URL as a
+//! bare relative path (e.g. `href="/details/1"`, the shape this router's own
+//! `t=search` test fixture uses), it rides all the way into the response
+//! body unresolved rather than being absolutized against the tracker's base
+//! URL. Absolutizing is a prerequisite for the next milestone's grab
+//! acceptance.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -204,7 +218,7 @@ where
     // `tvsearch`/`movie` request is legal Torznab, so there is no reason to
     // special-case it away here.
     match params.t.as_deref() {
-        Some("caps") => caps_response(&state.definitions_dir, &row.definition_id),
+        Some("caps") => caps_response(&state.definitions_dir, &row.definition_id).await,
         Some("search") => {
             let q = SearchQuery {
                 q: params.q.clone(),
@@ -232,8 +246,8 @@ where
             };
             search_response(&row, &state.definitions_dir, state.client.clone(), &q).await
         }
-        Some(other) => xml_response(StatusCode::OK, render_error(203, &no_such_function(other))),
-        None => xml_response(StatusCode::OK, render_error(203, "Missing parameter (t)")),
+        Some(other) => xml_response(StatusCode::OK, render_error(202, &no_such_function(other))),
+        None => xml_response(StatusCode::OK, render_error(200, "Missing parameter (t)")),
     }
 }
 
@@ -316,17 +330,24 @@ enum DefinitionError {
 /// Reads and parses `<definition_id>.yml` from `dir`. See the module docs'
 /// "Definition loading" section: no caching, by design, for now.
 ///
+/// Async (backed by [`tokio::fs::read_to_string`], not [`std::fs`]) since
+/// this runs inline in an async handler on every `t=caps` and every
+/// Cardigann-kind search — a blocking read here would stall the executor
+/// thread it runs on for every other in-flight request.
+///
 /// # Errors
 ///
 /// Returns [`DefinitionError::Io`] if the file cannot be read, or
 /// [`DefinitionError::Parse`] if it can be read but does not parse as a
 /// Cardigann v11 definition.
-fn load_definition(dir: &Path, definition_id: &str) -> Result<Definition, DefinitionError> {
+async fn load_definition(dir: &Path, definition_id: &str) -> Result<Definition, DefinitionError> {
     let path = dir.join(format!("{definition_id}.yml"));
-    let text = std::fs::read_to_string(&path).map_err(|source| DefinitionError::Io {
-        id: definition_id.to_string(),
-        source,
-    })?;
+    let text = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|source| DefinitionError::Io {
+            id: definition_id.to_string(),
+            source,
+        })?;
     parse_definition(&text).map_err(|source| DefinitionError::Parse {
         id: definition_id.to_string(),
         source,
@@ -337,8 +358,8 @@ fn load_definition(dir: &Path, definition_id: &str) -> Result<Definition, Defini
 /// [`CategoryMap`], then [`render_caps`]s them. A definition load failure
 /// renders as a `300` error with the failure's own [`Display`](fmt::Display)
 /// text.
-fn caps_response(definitions_dir: &Path, definition_id: &str) -> Response {
-    match load_definition(definitions_dir, definition_id) {
+async fn caps_response(definitions_dir: &Path, definition_id: &str) -> Response {
+    match load_definition(definitions_dir, definition_id).await {
         Ok(def) => {
             let map = CategoryMap::from_definition(&def);
             xml_response(StatusCode::OK, render_caps(&def, &map))
@@ -384,6 +405,7 @@ where
     match row.kind {
         IndexerKind::Cardigann => {
             let def = load_definition(definitions_dir, &row.definition_id)
+                .await
                 .map_err(|err| err.to_string())?;
             let settings = Settings::new(settings_from_json(&row.settings));
             CardigannIndexer::new(def, settings, client)

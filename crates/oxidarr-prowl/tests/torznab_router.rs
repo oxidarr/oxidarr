@@ -19,10 +19,10 @@ use tower::ServiceExt;
 /// The Cardigann definition every Cardigann-kind test uses:
 /// `tests/fixtures/defs/example.yml`, mirroring `oxidarr-indexer`'s own
 /// `cardigann_search.rs` fixture shape (a `tr.result` row with a
-/// `td.name a`/`td.dl a`/`td.seeds`/`td.leech` field set), plus `season`,
-/// `ep`, and `imdbid` search inputs so a `t=tvsearch`/`t=movie` request's
-/// parameters are provably threaded all the way into the tracker request
-/// URL.
+/// `td.name a`/`td.dl a`/`td.seeds`/`td.leech` field set), plus `q`,
+/// `season`, `ep`, and `imdbid` search inputs so a
+/// `t=search`/`t=tvsearch`/`t=movie` request's parameters are provably
+/// threaded all the way into the tracker request URL.
 fn definitions_dir() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/defs"))
 }
@@ -70,6 +70,26 @@ async fn insert_newznab_indexer(db: &Db, base_url: &str, apikey: &str) -> i32 {
             name: "Upstream Newznab".to_string(),
             definition_id: "upstream".to_string(),
             kind: IndexerKind::Newznab,
+            enabled: true,
+            settings: settings(&[("baseUrl", base_url), ("apiKey", apikey)]),
+            priority: 0,
+        })
+        .await
+        .unwrap();
+    row.id.0
+}
+
+/// Mirrors [`insert_newznab_indexer`] but for [`IndexerKind::Torznab`] —
+/// `ApiIndexer` is shared between the two kinds (see `oxidarr_indexer`'s
+/// `indexer` module doc comment), so this proves the router's own
+/// `IndexerKind::Torznab` dispatch arm wires through `TorznabIndexer`
+/// specifically, not just that `NewznabIndexer` works.
+async fn insert_torznab_indexer(db: &Db, base_url: &str, apikey: &str) -> i32 {
+    let row = IndexerRepo::new(db)
+        .insert(&NewIndexer {
+            name: "Upstream Torznab".to_string(),
+            definition_id: "upstream".to_string(),
+            kind: IndexerKind::Torznab,
             enabled: true,
             settings: settings(&[("baseUrl", base_url), ("apiKey", apikey)]),
             priority: 0,
@@ -209,15 +229,19 @@ async fn t_caps_returns_the_exact_caps_xml() {
 }
 
 #[tokio::test]
-async fn t_search_end_to_end_returns_the_exact_results_xml() {
+async fn t_search_end_to_end_returns_the_exact_results_xml_and_threads_q() {
+    // Also covers threading `q` into the tracker request URL: the fixture
+    // definition declares a `q` input (`{{ .Query.Q }}`), so `q=ubuntu`
+    // lands in the actual tracker request rather than being an unconsumed
+    // query parameter this test merely happened to pass.
     let db = seeded_db().await;
     let key = instance_api_key(&db).await;
     let indexer_id = insert_cardigann_indexer(&db, "My Example Indexer", true).await;
     let client = FakeClient::new().expect(
-        |r| r.url.as_str() == "https://example.org/browse",
+        |r| r.url.as_str() == "https://example.org/browse?q=ubuntu",
         ok_html("https://example.org/browse", SEARCH_HTML),
     );
-    let (app, _probe) = app(db, client);
+    let (app, probe) = app(db, client);
 
     let response = app
         .oneshot(get(format!(
@@ -254,6 +278,12 @@ async fn t_search_end_to_end_returns_the_exact_results_xml() {
             r#"</item></channel></rss>"#,
         )
     );
+    let requests = probe.requests();
+    assert_eq!(requests.len(), 1, "expected exactly one tracker request");
+    assert_eq!(
+        requests[0].url.as_str(),
+        "https://example.org/browse?q=ubuntu"
+    );
 }
 
 #[tokio::test]
@@ -262,7 +292,7 @@ async fn t_tvsearch_maps_season_and_episode_into_the_tracker_request() {
     let key = instance_api_key(&db).await;
     let indexer_id = insert_cardigann_indexer(&db, "Example", true).await;
     let client = FakeClient::new().expect(
-        |r| r.url.as_str() == "https://example.org/browse?ep=5&season=2",
+        |r| r.url.as_str() == "https://example.org/browse?ep=5&q=show&season=2",
         ok_html("https://example.org/browse", SEARCH_HTML),
     );
     let (app, probe) = app(db, client);
@@ -279,12 +309,14 @@ async fn t_tvsearch_maps_season_and_episode_into_the_tracker_request() {
     assert_eq!(requests.len(), 1, "expected exactly one tracker request");
     assert_eq!(
         requests[0].url.as_str(),
-        "https://example.org/browse?ep=5&season=2"
+        "https://example.org/browse?ep=5&q=show&season=2"
     );
 }
 
 #[tokio::test]
-async fn bad_t_returns_code_203() {
+async fn bad_t_returns_code_202() {
+    // Newznab convention (and `crate::torznab`'s own citations): 202 is "no
+    // such function", not the 203 this router used to ship.
     let db = seeded_db().await;
     let key = instance_api_key(&db).await;
     let indexer_id = insert_cardigann_indexer(&db, "Example", true).await;
@@ -297,11 +329,13 @@ async fn bad_t_returns_code_203() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_text(response).await;
-    assert!(body.contains(r#"code="203""#), "body was: {body}");
+    assert!(body.contains(r#"code="202""#), "body was: {body}");
 }
 
 #[tokio::test]
-async fn missing_t_also_returns_code_203() {
+async fn missing_t_returns_code_200() {
+    // Newznab convention: 200 is "missing parameter", not the 203 this
+    // router used to ship.
     let db = seeded_db().await;
     let key = instance_api_key(&db).await;
     let indexer_id = insert_cardigann_indexer(&db, "Example", true).await;
@@ -314,7 +348,7 @@ async fn missing_t_also_returns_code_203() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_text(response).await;
-    assert!(body.contains(r#"code="203""#), "body was: {body}");
+    assert!(body.contains(r#"code="200""#), "body was: {body}");
 }
 
 const NEWZNAB_FEED: &str = concat!(
@@ -390,4 +424,140 @@ async fn a_missing_definition_file_renders_a_300_error_for_caps() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_text(response).await;
     assert!(body.contains(r#"code="300""#), "body was: {body}");
+}
+
+/// Regression pin: `search_row` already treats a missing `baseUrl` setting
+/// on a Newznab/Torznab row as a `300` error (see `server.rs`'s
+/// `search_row`) — this was previously unexercised by any test in this
+/// file.
+#[tokio::test]
+async fn a_newznab_row_missing_the_base_url_setting_renders_a_300_error() {
+    let db = seeded_db().await;
+    let key = instance_api_key(&db).await;
+    let row_id = IndexerRepo::new(&db)
+        .insert(&NewIndexer {
+            name: "No Base Url".to_string(),
+            definition_id: "upstream".to_string(),
+            kind: IndexerKind::Newznab,
+            enabled: true,
+            settings: settings(&[("apiKey", "upstream-key")]),
+            priority: 0,
+        })
+        .await
+        .unwrap()
+        .id
+        .0;
+    let (app, _probe) = app(db, FakeClient::new());
+
+    let response = app
+        .oneshot(get(format!("/{row_id}/api?apikey={key}&t=search")))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_text(response).await;
+    assert!(body.contains(r#"code="300""#), "body was: {body}");
+}
+
+/// Regression pin: mirrors [`newznab_row_wires_through_the_api_indexer`],
+/// proving `IndexerKind::Torznab` rows dispatch through `TorznabIndexer`
+/// end to end, not just `IndexerKind::Newznab` ones.
+#[tokio::test]
+async fn torznab_row_wires_through_the_api_indexer() {
+    let db = seeded_db().await;
+    let key = instance_api_key(&db).await;
+    let indexer_id = insert_torznab_indexer(&db, "https://api.example.com/", "upstream-key").await;
+    let client = FakeClient::new().expect(
+        |r| r.url.as_str() == "https://api.example.com/api?t=search&apikey=upstream-key",
+        ok_html("https://api.example.com/api", NEWZNAB_FEED),
+    );
+    let (app, probe) = app(db, client);
+
+    let response = app
+        .oneshot(get(format!("/{indexer_id}/api?apikey={key}&t=search")))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_text(response).await;
+    assert!(
+        body.contains("<title>Some.Release.2026</title>"),
+        "body was: {body}"
+    );
+    assert!(
+        body.contains("https://api.example.com/download/9.nzb"),
+        "body was: {body}"
+    );
+    let requests = probe.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url.as_str(),
+        "https://api.example.com/api?t=search&apikey=upstream-key"
+    );
+}
+
+/// Regression pin: mirrors
+/// [`a_missing_definition_file_renders_a_300_error_for_caps`] but for
+/// `t=search` — `search_row`'s `IndexerKind::Cardigann` arm calls the same
+/// `load_definition` `t=caps` does, so a missing/unparseable definition file
+/// renders the same `300` on a search request too.
+#[tokio::test]
+async fn a_missing_definition_file_renders_a_300_error_for_search() {
+    let db = seeded_db().await;
+    let key = instance_api_key(&db).await;
+    let row_id = IndexerRepo::new(&db)
+        .insert(&NewIndexer {
+            name: "Ghost".to_string(),
+            definition_id: "does-not-exist".to_string(),
+            kind: IndexerKind::Cardigann,
+            enabled: true,
+            settings: settings(&[]),
+            priority: 0,
+        })
+        .await
+        .unwrap()
+        .id
+        .0;
+    let (app, _probe) = app(db, FakeClient::new());
+
+    let response = app
+        .oneshot(get(format!("/{row_id}/api?apikey={key}&t=search")))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_text(response).await;
+    assert!(body.contains(r#"code="300""#), "body was: {body}");
+}
+
+#[tokio::test]
+async fn t_movie_threads_imdbid_into_the_tracker_request() {
+    // The fixture definition declares an `imdbid` input
+    // (`{{ .Query.IMDBID }}`), so this proves `t=movie`'s `imdbid` query
+    // parameter is threaded all the way into the tracker request URL —
+    // mirroring `t_tvsearch_maps_season_and_episode_into_the_tracker_request`
+    // for `season`/`ep`.
+    let db = seeded_db().await;
+    let key = instance_api_key(&db).await;
+    let indexer_id = insert_cardigann_indexer(&db, "Example", true).await;
+    let client = FakeClient::new().expect(
+        |r| r.url.as_str() == "https://example.org/browse?imdbid=tt1234567",
+        ok_html("https://example.org/browse", SEARCH_HTML),
+    );
+    let (app, probe) = app(db, client);
+
+    let response = app
+        .oneshot(get(format!(
+            "/{indexer_id}/api?apikey={key}&t=movie&imdbid=tt1234567"
+        )))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let requests = probe.requests();
+    assert_eq!(requests.len(), 1, "expected exactly one tracker request");
+    assert_eq!(
+        requests[0].url.as_str(),
+        "https://example.org/browse?imdbid=tt1234567"
+    );
 }

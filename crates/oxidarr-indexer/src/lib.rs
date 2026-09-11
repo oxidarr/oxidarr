@@ -29,6 +29,16 @@
 //!   subsystem.
 //! - Search bodies are decoded per the definition's declared `encoding`;
 //!   login pages are not yet — see [`login::authenticate`]'s doc comment.
+//! - A `details`/`download` field extracted as a relative URL (e.g.
+//!   `href="/details/1"`) is stored on [`Release::details_url`]/
+//!   [`Release::download_url`] verbatim — see
+//!   `oxidarr_cardigann::engine::build_release` — and served the same way
+//!   all the way out through `oxidarr-prowl`'s rendered Torznab feed (see
+//!   that crate's own doc comment). Nothing in this crate absolutizes it
+//!   against the tracker's base URL. Absolutizing is a prerequisite for the
+//!   next milestone's grab acceptance (Sonarr/Radarr resolve a feed's `link`/
+//!   `comments` relative to the *feed's own* URL, which is this instance's
+//!   Torznab endpoint, not the tracker's).
 
 pub mod builder;
 pub mod cardigann;
