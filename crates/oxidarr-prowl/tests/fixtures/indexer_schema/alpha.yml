@@ -1,0 +1,24 @@
+id: alpha
+name: Alpha Tracker
+description: An alpha description
+language: en-US
+caps:
+  categorymappings:
+    - {id: "1", cat: Movies, desc: "Movies"}
+settings:
+  - name: cookie
+    type: text
+    label: Cookie
+  - name: sort
+    type: select
+    label: Sort By
+    default: seeders
+    options:
+      seeders: Seeders
+      size: Size
+search:
+  rows:
+    selector: tr.result
+  fields:
+    title:
+      selector: a

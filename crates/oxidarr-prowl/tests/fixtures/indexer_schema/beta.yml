@@ -1,0 +1,21 @@
+id: beta
+name: Beta Tracker
+description: A beta description
+language: en
+caps:
+  categorymappings:
+    - {id: "2", cat: TV, desc: "TV"}
+settings:
+  - name: apikey
+    type: password
+    label: API Key
+  - name: freeleech
+    type: checkbox
+    label: Freeleech Only
+    default: "true"
+search:
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a
