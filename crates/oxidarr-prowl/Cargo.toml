@@ -17,6 +17,13 @@ name = "oxidarr-prowl"
 path = "src/main.rs"
 
 [dependencies]
+oxidarr-core = { workspace = true }
+oxidarr-cardigann = { workspace = true }
+quick-xml = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+oxidarr-indexer = { workspace = true }
 
 [lints]
 workspace = true

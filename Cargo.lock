@@ -1337,6 +1337,13 @@ dependencies = [
 [[package]]
 name = "oxidarr-prowl"
 version = "0.0.0"
+dependencies = [
+ "chrono",
+ "oxidarr-cardigann",
+ "oxidarr-core",
+ "oxidarr-indexer",
+ "quick-xml",
+]
 
 [[package]]
 name = "oxidarr-ui"

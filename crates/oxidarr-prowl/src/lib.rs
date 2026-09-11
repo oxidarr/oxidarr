@@ -1,9 +1,12 @@
 //! Prowlarr-compatible indexer manager, in Rust
 //!
-//! Application layer: Prowlarr-shaped `/api/v1` routes, indexer configuration,
-//! app-sync to downstream *arr instances, search proxying, and scheduling.
-//! Intentionally thin — the work lives in `oxidarr-cardigann`, `oxidarr-indexer`,
-//! `oxidarr-http`, and `oxidarr-db`.
+//! [`torznab`] renders pure Torznab/Newznab XML — capability negotiation
+//! (`t=caps`), search results, and error responses — from a Cardigann
+//! [`Definition`](oxidarr_cardigann::model::Definition)'s declared
+//! capabilities and [`oxidarr_core::Release`] values. It performs no I/O and
+//! wires up no `axum` router; the HTTP server behind `/api/v1` lands in a
+//! later task.
 
-/// Placeholder export. Scaffolding only — no business logic yet.
-pub const CRATE_NAME: &str = "oxidarr-prowl";
+pub mod torznab;
+
+pub use torznab::{render_caps, render_error, render_results};

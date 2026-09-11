@@ -3,8 +3,5 @@
 //! Scaffolding only — the server is not implemented yet.
 
 fn main() {
-    println!(
-        "{} (scaffolding, not implemented)",
-        oxidarr_prowl::CRATE_NAME
-    );
+    println!("oxidarr-prowl (scaffolding, not implemented)");
 }
