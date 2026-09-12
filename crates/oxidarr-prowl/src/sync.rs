@@ -398,10 +398,15 @@ pub async fn sync_application<C: HttpClient>(
                     &categories,
                     Some(mapping.remote_indexer_id),
                 );
-                let resp =
-                    put_indexer(client, app, mapping.remote_indexer_id.0, payload.clone()).await?;
+                let resp = put_indexer(client, app, mapping.remote_indexer_id.0, payload).await?;
                 if resp.status == 404 {
-                    let remote_id = post_indexer(client, app, payload).await?;
+                    // Real Sonarr's Insert throws on a non-zero id, so the
+                    // fallback POST needs a fresh payload built with
+                    // `remote_id: None` — reusing the PUT's payload (which
+                    // still carries the stale remote id) would fail there.
+                    let fallback_payload =
+                        build_indexer_payload(row, external_url, instance_key, &categories, None);
+                    let remote_id = post_indexer(client, app, fallback_payload).await?;
                     MappingRepo::new(db)
                         .set(MappingRow {
                             app_id: app.id,
@@ -978,6 +983,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(mapping.remote_indexer_id, RemoteIndexerId(9));
+
+        let requests = client.requests();
+        let post_request = requests
+            .iter()
+            .find(|req| req.method == Method::Post)
+            .unwrap();
+        let body = post_request
+            .body
+            .as_ref()
+            .and_then(|body| match body {
+                Body::Json(value) => Some(value),
+                Body::Form(_) => None,
+            })
+            .unwrap();
+        assert!(
+            !body.as_object().unwrap().contains_key("id"),
+            "fallback POST body must not carry the stale remote id \
+             (real Sonarr's Insert throws on a non-zero id): {body:?}"
+        );
     }
 
     // A `full_sync_deletes_the_remote_entry_for_a_removed_local_indexer`

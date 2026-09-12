@@ -88,7 +88,7 @@ They are third-party and unlicensed, so they are never committed — fetch them 
    oxidarr-prowl 0.0.0
    listening on 0.0.0.0:9696
    data dir: ./data
-   external url: http://127.0.0.1:9696
+   external url: http://127.0.0.1:9696/
    definitions loaded: 548
    api key: <this instance's key>
    ```

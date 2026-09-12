@@ -142,8 +142,8 @@ pub struct SearchPath {
     /// `None` when the definition does not declare the key at all —
     /// distinct from an explicit `followredirect: false` — so a consumer
     /// can default absent to whatever it needs without losing that
-    /// distinction (see `oxidarr_indexer::builder`'s mapping and the Task 6
-    /// report for why that distinction matters here).
+    /// distinction (see `oxidarr_indexer::builder`'s mapping for why that
+    /// distinction matters here).
     #[serde(default)]
     pub followredirect: Option<bool>,
 }

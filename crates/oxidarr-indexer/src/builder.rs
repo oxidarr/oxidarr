@@ -502,9 +502,9 @@ search:
         // tracker id mapped to *any* of its children (tv, tracker "2" ->
         // 5030) as well as one mapped to the bare block itself (tv-block-
         // only, tracker "3" -> 5000) — `CategoryMap::to_tracker`'s parent
-        // expansion (Task 2), exercised end to end through request
-        // building. "movies" (tracker "1" -> 2000, an unrelated top-level
-        // block) must NOT be reached.
+        // expansion, exercised end to end through request building.
+        // "movies" (tracker "1" -> 2000, an unrelated top-level block) must
+        // NOT be reached.
         let def = parse(CATEGORY_DEF);
         let q = query("ubuntu", vec![5000]);
 

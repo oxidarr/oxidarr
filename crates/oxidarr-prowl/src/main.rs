@@ -115,9 +115,11 @@ fn print_missing_definitions_notice(dir: &Path) {
         dir.display()
     );
     eprintln!(
-        "oxidarr-prowl does not fetch definitions automatically; run \
-         scripts/fetch-definitions.sh (or otherwise populate that \
-         directory) to enable Torznab/Cardigann indexer search."
+        "oxidarr-prowl does not fetch definitions automatically; \
+         scripts/fetch-definitions.sh writes into <dest>/v11/, one \
+         directory level below {} — see the README's \"Quick start\" step \
+         2 for the exact fetch-and-symlink commands.",
+        dir.display()
     );
     eprintln!(
         "the control-plane API will continue to serve without them — this \

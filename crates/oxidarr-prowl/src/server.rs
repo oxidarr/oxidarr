@@ -58,6 +58,22 @@
 //! missing or unparseable value is a `300` error) and `"apiKey"` (optional,
 //! forwarded as the indexer's own upstream API key, unrelated to this
 //! instance's own `apikey` query parameter checked above).
+//!
+//! # Known limitations
+//!
+//! - `method: cookie` Cardigann definitions
+//!   (`oxidarr_indexer::login::authenticate`'s cookie flow) are not
+//!   functional through this server. That flow only ever confirms a
+//!   per-indexer `cookie` setting is present — the actual cookie has to
+//!   reach the transport via [`oxidarr_indexer::ReqwestClient::with_cookie`],
+//!   which builds a *new* client scoped to one cookie value. `tracker_client`
+//!   here is one client shared across every indexer's searches (see
+//!   [`AppState`]'s "Two client fields" section), built once at startup with
+//!   no definition or per-indexer settings in view, so no indexer's own
+//!   `cookie` setting is ever seeded into it. A cookie-login indexer
+//!   therefore searches unauthenticated exactly as if no cookie had been
+//!   configured at all — this is a documented deferral, not an oversight to
+//!   fix opportunistically.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -128,8 +144,9 @@ pub struct AppState<C> {
     /// `http://oxidarr.local:9696` — used by `crate::sync` to build the
     /// Torznab `baseUrl` a synced Sonarr/Radarr indexer is pushed with
     /// (`{external_url}/{indexer_id}`, joined with that application's own
-    /// `apiPath`). Task 9 sources this from instance configuration; every
-    /// test in this crate today pins it to a fixed value.
+    /// `apiPath`). Sourced from instance configuration (`Config::external_url`,
+    /// see `crate::config`'s module docs); every test in this crate today
+    /// pins it to a fixed value.
     pub external_url: Url,
 }
 

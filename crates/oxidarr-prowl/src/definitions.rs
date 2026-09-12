@@ -3,11 +3,15 @@
 //!
 //! This replaces `server`'s former uncached `load_definition` (see git
 //! history): every `t=caps` and every Cardigann-kind search used to read
-//! and parse `<definition_id>.yml` from scratch, on every request. Fetching
-//! the definition corpus itself from upstream is the binary's job (a
-//! startup-time shell-out to `scripts/fetch-definitions.sh`, wired up
-//! separately) — this store only ever reads a local directory that is
-//! assumed to already be populated.
+//! and parse `<definition_id>.yml` from scratch, on every request. This
+//! store only ever reads a local directory that is assumed to already be
+//! populated — the binary never fetches the definition corpus itself; on
+//! an empty or missing directory it prints an instruction naming
+//! `scripts/fetch-definitions.sh` and keeps serving regardless (see
+//! `oxidarr-prowl`'s own `src/main.rs`, "Definitions are not
+//! auto-downloaded"). Running that script, and pointing this store's
+//! directory at what it wrote, is the operator's own documented setup step
+//! (the README's "Quick start").
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -455,6 +459,37 @@ search:
         let store = DefinitionStore::new(dir.path().to_path_buf());
 
         let err = store.get("").await.unwrap_err();
+
+        assert!(
+            matches!(err, DefinitionError::InvalidId { .. }),
+            "err was: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_rejects_the_bare_dot_id() {
+        // `validate_id`'s `id != "."` check on its own, distinct from
+        // `get_rejects_the_literal_dotdot_id` (`..`) right above.
+        let dir = tempfile::tempdir().unwrap();
+        let store = DefinitionStore::new(dir.path().to_path_buf());
+
+        let err = store.get(".").await.unwrap_err();
+
+        assert!(
+            matches!(err, DefinitionError::InvalidId { .. }),
+            "err was: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_rejects_a_backslash_only_id() {
+        // `validate_id`'s `!id.contains(['/', '\\'])` half not yet pinned on
+        // its own — `get_rejects_ids_containing_a_path_separator` above only
+        // exercises the forward-slash case.
+        let dir = tempfile::tempdir().unwrap();
+        let store = DefinitionStore::new(dir.path().to_path_buf());
+
+        let err = store.get("\\").await.unwrap_err();
 
         assert!(
             matches!(err, DefinitionError::InvalidId { .. }),

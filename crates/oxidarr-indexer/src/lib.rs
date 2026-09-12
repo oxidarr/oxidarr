@@ -24,9 +24,14 @@
 //!   top-level `followredirect` (distinct from each path's own) is still
 //!   parsed but not consulted: login requests always follow redirects
 //!   regardless of what it declares (see [`login::authenticate`]).
-//! - `t=caps` (indexer capability negotiation, including category mappings)
-//!   is not fetched or modelled; it lands with the category-mapping
-//!   subsystem.
+//! - `t=caps` category mapping is modelled and rendered for Cardigann-kind
+//!   indexers, straight from each definition's own declared
+//!   `caps`/`categorymappings` (see `oxidarr_cardigann::catmap::CategoryMap`
+//!   and `oxidarr-prowl`'s `torznab::render_caps`). What is still absent is
+//!   fetching `t=caps` *from* an upstream Newznab/Torznab tracker for a
+//!   generic (non-Cardigann) feed — a `Newznab`/`Torznab`-kind indexer has
+//!   no declared categories of its own to report, and is skipped rather than
+//!   guessed at wherever this matters (see `oxidarr-prowl`'s `sync` module).
 //! - Search bodies are decoded per the definition's declared `encoding`;
 //!   login pages are not yet — see [`login::authenticate`]'s doc comment.
 

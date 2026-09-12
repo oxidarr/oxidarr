@@ -350,12 +350,43 @@ async fn update_and_delete_on_a_missing_id_both_return_404() {
     assert!(problem["message"].is_string());
 }
 
+/// `update` runs a `PUT` body through the very same `build_new_indexer`
+/// validation `create` does (see `create_rejects_a_path_traversal_definition_name`
+/// above), *before* touching the row — pinning that a traversal
+/// `definitionName` is rejected there too, on an indexer that genuinely
+/// exists, not just on the missing-id case
+/// `update_and_delete_on_a_missing_id_both_return_404` already covers.
+#[tokio::test]
+async fn update_rejects_a_path_traversal_definition_name() {
+    let app = v1_app(seeded_db().await, FakeClient::new());
+    let input = cardigann_body("My Indexer", 12, true, &json!([]));
+    let response = app
+        .clone()
+        .oneshot(json_request("POST", "/api/v1/indexer", &input))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let id = body_json(response).await["id"].as_i64().unwrap();
+
+    let mut body = cardigann_body("Bad", 25, true, &json!([]));
+    body["definitionName"] = json!("../etc");
+    let response = app
+        .oneshot(json_request("PUT", &format!("/api/v1/indexer/{id}"), &body))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let problem = body_json(response).await;
+    assert!(problem["message"].is_string(), "body was: {problem}");
+}
+
 #[tokio::test]
 async fn test_endpoint_returns_an_empty_array_on_a_successful_search() {
     let client = FakeClient::new().expect(
         |r| r.url.as_str() == "https://example.org/browse",
         ok_html("https://example.org/browse", SEARCH_HTML),
     );
+    let probe = client.clone();
     let app = v1_app(seeded_db().await, client);
     let body = cardigann_body("Probe", 25, true, &json!([]));
 
@@ -367,6 +398,11 @@ async fn test_endpoint_returns_an_empty_array_on_a_successful_search() {
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
     assert_eq!(json, json!([]));
+    assert_eq!(
+        probe.requests().len(),
+        1,
+        "expected exactly one tracker request for the test probe"
+    );
 }
 
 #[tokio::test]
@@ -567,5 +603,65 @@ async fn delete_triggers_a_remote_delete_for_a_fullsync_applications_mapped_inde
     assert_eq!(
         requests[0].url.as_str(),
         "http://sonarr.example/api/v3/indexer/42"
+    );
+}
+
+/// `DELETE /api/v1/indexer/{id}`, with an `addOnly` application already
+/// mapping that indexer: `remove`'s `doomed_remote_mappings` helper filters
+/// its snapshot down to `fullSync` applications only, so an `addOnly`
+/// mapping must never trigger a remote `DELETE` — pinning the untested half
+/// of that filter (only `fullSync` was covered above).
+///
+/// Asserted via `probe.requests()` being empty, the same way the `fullSync`
+/// counterpart above proves a call *did* happen — here proving none did,
+/// which `FakeClient`'s own unmatched-expectation panic wouldn't catch on
+/// its own since `remove`'s sync call is best-effort and its outcome is
+/// discarded either way.
+#[tokio::test]
+async fn delete_issues_no_remote_delete_for_an_addonly_applications_mapped_indexer() {
+    let db = seeded_db().await;
+    let radarr = ApplicationRepo::new(&db)
+        .insert(&NewApplication {
+            name: "Radarr Main".to_string(),
+            kind: AppKind::Radarr,
+            base_url: "http://sonarr.example".to_string(),
+            api_key: "sonarr-key".to_string(),
+            sync_level: SyncLevel::AddOnly,
+        })
+        .await
+        .unwrap();
+    let indexer = IndexerRepo::new(&db)
+        .insert(&NewIndexer {
+            name: "My Indexer".to_string(),
+            definition_id: "example".to_string(),
+            kind: IndexerKind::Cardigann,
+            enabled: true,
+            settings: serde_json::Map::new(),
+            priority: 25,
+        })
+        .await
+        .unwrap();
+    MappingRepo::new(&db)
+        .set(MappingRow {
+            app_id: radarr.id,
+            indexer_id: indexer.id,
+            remote_indexer_id: RemoteIndexerId(42),
+        })
+        .await
+        .unwrap();
+    let app_client = FakeClient::new();
+    let probe = app_client.clone();
+    let router = v1_app_with_app_client(db, FakeClient::new(), app_client);
+
+    let response = router
+        .oneshot(delete(&format!("/api/v1/indexer/{}", indexer.id.0)))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let requests = probe.requests();
+    assert!(
+        requests.is_empty(),
+        "expected no Sonarr/Radarr calls for an addOnly mapping, got {requests:?}"
     );
 }

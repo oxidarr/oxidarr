@@ -488,7 +488,12 @@ async fn test_endpoint_probes_the_exact_status_url_and_header_on_success() {
 #[tokio::test]
 async fn test_endpoint_probes_radarr_at_the_same_api_v3_path() {
     let client = FakeClient::new().expect(
-        |r| r.url.as_str() == "http://radarr.example:7878/api/v3/system/status",
+        |r| {
+            r.url.as_str() == "http://radarr.example:7878/api/v3/system/status"
+                && r.headers
+                    .iter()
+                    .any(|(k, v)| k == "X-Api-Key" && v == "secret")
+        },
         status_response(200),
     );
     let app = v1_app(seeded_db().await, client);
@@ -497,6 +502,33 @@ async fn test_endpoint_probes_radarr_at_the_same_api_v3_path() {
         "Radarr",
         "fullSync",
         "http://radarr.example:7878",
+        "secret",
+    );
+
+    let response = app
+        .oneshot(json_request("POST", "/api/v1/applications/test", &body))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// A `baseUrl` with a path segment (Sonarr/Radarr both support running
+/// behind a reverse-proxy subpath) must have the probe path appended after
+/// it, not overwrite it — pinning `test`'s `format!("{}/api/v3/system/status",
+/// base_url.trim_end_matches('/'))` join.
+#[tokio::test]
+async fn test_endpoint_probes_a_subpath_base_url_correctly() {
+    let client = FakeClient::new().expect(
+        |r| r.url.as_str() == "http://sonarr.example/sonarr/api/v3/system/status",
+        status_response(200),
+    );
+    let app = v1_app(seeded_db().await, client);
+    let body = application_body(
+        "Probe",
+        "Sonarr",
+        "fullSync",
+        "http://sonarr.example/sonarr",
         "secret",
     );
 

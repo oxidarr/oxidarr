@@ -46,8 +46,8 @@
 //! # `definitionName` validation
 //!
 //! Every `POST`/`PUT` validates `definitionName` before it ever reaches
-//! [`NewIndexer`]/[`IndexerRow`], carried over from Task 2's review: a value
-//! containing `/`, `\`, `..`, or that is empty or exactly `.` is rejected
+//! [`NewIndexer`]/[`IndexerRow`]: a value containing `/`, `\`, `..`, or that
+//! is empty or exactly `.` is rejected
 //! with a `400` [`Problem`] — the exact same shape
 //! [`crate::definitions::DefinitionStore`]'s own `validate_id` rejects,
 //! duplicated here (rather than imported) since that check is private to

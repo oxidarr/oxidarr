@@ -581,11 +581,8 @@ search:
     /// back on the original `leechers` — see `rss.rs`'s `into_release`) or
     /// is left at `Release::default()` on both sides: `imdb_id`, `tmdb_id`,
     /// `tvdb_id`, `minimum_seed_time`, `minimum_ratio`, and `files` are real
-    /// `Release` fields this renderer does not emit at all (outside this
-    /// task's scope per the brief) — `grabs` used to be one of these too,
-    /// until it was added in Task 10 per that task's own deferred ruling —
-    /// and `description`,
-    /// `poster`, `genre` are fields `parse_feed` itself never populates from
+    /// `Release` fields this renderer does not emit at all, and
+    /// `description`, `poster`, `genre` are fields `parse_feed` itself never populates from
     /// any Torznab/Newznab element (see its own doc comment) — so neither
     /// side of the round trip ever sets them to anything but `None`.
     #[test]

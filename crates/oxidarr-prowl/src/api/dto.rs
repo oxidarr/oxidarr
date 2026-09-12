@@ -1,8 +1,7 @@
 //! Shared Prowlarr-shaped response DTOs, reused by more than one `/api/v1`
-//! endpoint. Task 4 ([`crate::api::indexer_schema`]) starts this module with
-//! the indexer schema shapes; Task 5 ([`crate::api::indexers`]) and Task 6
-//! ([`crate::api::applications`]) extend it with indexer/application CRUD
-//! payloads.
+//! endpoint: [`crate::api::indexer_schema`]'s indexer schema shapes,
+//! [`crate::api::indexers`]'s and [`crate::api::applications`]'s
+//! indexer/application CRUD payloads.
 //!
 //! # Prowlarr shapes
 //!
@@ -79,8 +78,8 @@ use serde_json::Value;
 /// Prowlarr's `IndexerResource`, cut to the fields in this module's doc
 /// table.
 ///
-/// Deserializes as well as serializes: Task 5's indexer CRUD reuses this
-/// exact shape for `POST`/`PUT /indexer` request bodies, not just
+/// Deserializes as well as serializes: [`crate::api::indexers`]'s indexer
+/// CRUD reuses this exact shape for `POST`/`PUT /indexer` request bodies, not just
 /// `GET /indexer/schema` responses. `implementation` is a plain `String`
 /// (not `&'static str`, unlike this doc table's Rust-side source) purely so
 /// a client-supplied value can deserialize into it at all; every field a
@@ -165,10 +164,10 @@ pub struct IndexerCategory {
 /// type mapping" section for `kind`/`value`/`select_options` semantics.
 ///
 /// Deserializes as well as serializes — see [`IndexerResource`]'s own doc
-/// comment. Only `name` is required on input: Task 5's write path
-/// (`crate::api::indexers`) reads only `name`/`value` off each `Field` to
-/// build an indexer's settings map, so `label`/`type`/`select_options` all
-/// default when a client omits them.
+/// comment. Only `name` is required on input: [`crate::api::indexers`]'s
+/// write path reads only `name`/`value` off each `Field` to build an
+/// indexer's settings map, so `label`/`type`/`select_options` all default
+/// when a client omits them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Field {

@@ -100,8 +100,10 @@
 //! own doc comment for the exact field mapping). The concatenated list is
 //! sorted by `seeders` descending, releases with no reported `seeders`
 //! sorted last, stably (ties, including between two `None`s, keep their
-//! original relative order — indexer-list order, then within an indexer, the
-//! order that indexer's own feed reported them in).
+//! original relative order — [`tokio::task::JoinSet`] completion order
+//! across indexers, which is not selection order and not deterministic run
+//! to run; within one indexer's own results, the order that indexer's own
+//! feed reported them in, which is preserved).
 
 use axum::Json;
 use axum::Router;

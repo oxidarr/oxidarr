@@ -1081,6 +1081,79 @@ search:
     }
 
     #[test]
+    fn a_relative_poster_resolves_against_the_response_base_like_details_and_download() {
+        // `poster` goes through the same `resolved` closure as
+        // `details`/`download` (`build_release`'s `release.poster =
+        // resolved("poster")`) — pinned separately since none of the other
+        // resolution tests above exercise this field.
+        let yaml = r"
+id: simple
+name: Simple
+search:
+  rows:
+    selector: tr.result
+  fields:
+    title:
+      selector: td.name
+    poster:
+      selector: td.name a
+      attribute: href
+";
+        let html = r#"<table><tr class="result"><td class="name"><a href="/img/poster1.jpg">A</a></td></tr></table>"#;
+        let def = parse_definition(yaml).unwrap();
+        let base: url::Url = "https://t.example/browse".parse().unwrap();
+        let releases = extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &base,
+        )
+        .unwrap();
+        assert_eq!(
+            releases[0].poster.as_deref(),
+            Some("https://t.example/img/poster1.jpg")
+        );
+    }
+
+    #[test]
+    fn a_protocol_relative_value_joins_with_the_base_s_scheme() {
+        // `//host/path` has no scheme, so `Url::parse` rejects it as
+        // absolute and it falls through to `base.join(value)` — `Url::join`
+        // treats a leading `//` as a scheme-relative reference and borrows
+        // the base's own scheme, exactly what a browser does with a
+        // protocol-relative `href`.
+        let yaml = r"
+id: simple
+name: Simple
+search:
+  rows:
+    selector: tr.result
+  fields:
+    title:
+      selector: td.name
+    poster:
+      selector: td.name a
+      attribute: href
+";
+        let html = r#"<table><tr class="result"><td class="name"><a href="//cdn.example.org/img/poster1.jpg">A</a></td></tr></table>"#;
+        let def = parse_definition(yaml).unwrap();
+        let base: url::Url = "https://t.example/browse".parse().unwrap();
+        let releases = extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &base,
+        )
+        .unwrap();
+        assert_eq!(
+            releases[0].poster.as_deref(),
+            Some("https://cdn.example.org/img/poster1.jpg")
+        );
+    }
+
+    #[test]
     fn a_json_field_path_selector_is_a_clear_error_not_a_silent_empty_value() {
         // `selector::compile` recognises Cardigann's JSON field-path grammar
         // (`$`, `$.field`, `items[0].name`, ...), used by definitions whose
