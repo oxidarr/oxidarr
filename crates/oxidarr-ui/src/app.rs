@@ -37,6 +37,7 @@ use crate::components::banner::Banner;
 use crate::components::key_prompt::KeyPrompt;
 use crate::components::layout::Layout;
 use crate::key_store;
+use crate::screens::applications::Applications;
 use crate::screens::indexers::Indexers;
 use crate::screens::status::Status;
 
@@ -59,16 +60,8 @@ pub enum Route {
         Search {},
 }
 
-/// Stands in for the applications screen until that task lands (Plan 4's
-/// task 5) — `crate::screens` only ships `indexers`/`status` today.
-#[component]
-fn Applications() -> Element {
-    rsx! {
-        p { "Application management is not built yet." }
-    }
-}
-
-/// See [`Applications`]'s own doc comment (task 6).
+/// Stands in for the search screen until that task lands (Plan 4's task
+/// 6) — `crate::screens` ships `applications`/`indexers`/`status` today.
 #[component]
 fn Search() -> Element {
     rsx! {

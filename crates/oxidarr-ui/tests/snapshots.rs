@@ -51,7 +51,14 @@ use std::path::PathBuf;
 use dioxus::prelude::*;
 use oxidarr_ui::components::banner::Banner;
 use oxidarr_ui::components::key_prompt::KeyPrompt;
-use oxidarr_ui::dto::{Field, IndexerCapabilities, IndexerResource, SelectOption, SystemStatus};
+use oxidarr_ui::dto::{
+    ApplicationResource, Field, IndexerCapabilities, IndexerResource, SelectOption, SyncLevel,
+    SystemStatus,
+};
+use oxidarr_ui::screens::applications::{
+    ApplicationFormView, ApplicationListView, TestOutcome as ApplicationTestOutcome,
+    TestOutcomeView as ApplicationTestOutcomeView,
+};
 use oxidarr_ui::screens::indexers::{
     IndexerFormView, IndexerListView, TestOutcome, TestOutcomeView,
 };
@@ -239,6 +246,157 @@ fn test_outcome_view_html(outcome: Option<TestOutcome>) -> String {
     dioxus::ssr::render(&vdom)
 }
 
+fn fixture_application(id: i32, name: &str, implementation: &str) -> ApplicationResource {
+    ApplicationResource {
+        id,
+        name: name.to_string(),
+        implementation: implementation.to_string(),
+        sync_level: SyncLevel::FullSync,
+        fields: vec![
+            Field {
+                name: "baseUrl".to_string(),
+                label: "baseUrl".to_string(),
+                kind: "textbox".to_string(),
+                value: Some(serde_json::Value::String(format!(
+                    "http://{}.example",
+                    implementation.to_lowercase()
+                ))),
+                select_options: None,
+            },
+            Field {
+                name: "apiKey".to_string(),
+                label: "apiKey".to_string(),
+                kind: "textbox".to_string(),
+                value: Some(serde_json::Value::String("secretkey".to_string())),
+                select_options: None,
+            },
+        ],
+        sync_error: None,
+    }
+}
+
+/// [`ApplicationListView`] carries `EventHandler` props, same restriction as
+/// [`indexer_list_view_html`] above — see this file's own module docs.
+fn application_list_view_html(
+    applications: Vec<ApplicationResource>,
+    confirm_delete_id: Option<i32>,
+    test_results: HashMap<i32, ApplicationTestOutcome>,
+) -> String {
+    thread_local! {
+        static APPLICATIONS: RefCell<Vec<ApplicationResource>> = const { RefCell::new(Vec::new()) };
+        static CONFIRM_DELETE_ID: RefCell<Option<i32>> = const { RefCell::new(None) };
+        static TEST_RESULTS: RefCell<HashMap<i32, ApplicationTestOutcome>> = RefCell::new(HashMap::new());
+    }
+
+    fn root() -> Element {
+        let applications = APPLICATIONS.with(|cell| cell.borrow().clone());
+        let confirm_delete_id = CONFIRM_DELETE_ID.with(|cell| *cell.borrow());
+        let test_results = TEST_RESULTS.with(|cell| cell.borrow().clone());
+        rsx! {
+            ApplicationListView {
+                applications,
+                confirm_delete_id,
+                test_results,
+                on_add: move |()| {},
+                on_edit: move |_id: i32| {},
+                on_delete_request: move |_id: i32| {},
+                on_delete_confirm: move |_id: i32| {},
+                on_delete_cancel: move |()| {},
+                on_test: move |_id: i32| {},
+            }
+        }
+    }
+
+    APPLICATIONS.with(|cell| *cell.borrow_mut() = applications);
+    CONFIRM_DELETE_ID.with(|cell| *cell.borrow_mut() = confirm_delete_id);
+    TEST_RESULTS.with(|cell| *cell.borrow_mut() = test_results);
+    let mut vdom = VirtualDom::new(root);
+    vdom.rebuild_in_place();
+    dioxus::ssr::render(&vdom)
+}
+
+/// See [`application_list_view_html`]'s own doc comment — same restriction,
+/// same `thread_local` workaround, for [`ApplicationFormView`].
+#[allow(clippy::too_many_arguments)]
+fn application_form_view_html(
+    implementation: &str,
+    name: &str,
+    base_url: &str,
+    api_key: &str,
+    sync_level: SyncLevel,
+    errors: Vec<String>,
+) -> String {
+    thread_local! {
+        static IMPLEMENTATION: RefCell<String> = const { RefCell::new(String::new()) };
+        static NAME: RefCell<String> = const { RefCell::new(String::new()) };
+        static BASE_URL: RefCell<String> = const { RefCell::new(String::new()) };
+        static API_KEY: RefCell<String> = const { RefCell::new(String::new()) };
+        static SYNC_LEVEL: RefCell<SyncLevel> = const { RefCell::new(SyncLevel::Disabled) };
+        static ERRORS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn root() -> Element {
+        let implementation = IMPLEMENTATION.with(|cell| cell.borrow().clone());
+        let name = NAME.with(|cell| cell.borrow().clone());
+        let base_url = BASE_URL.with(|cell| cell.borrow().clone());
+        let api_key = API_KEY.with(|cell| cell.borrow().clone());
+        let sync_level = SYNC_LEVEL.with(|cell| *cell.borrow());
+        let errors = ERRORS.with(|cell| cell.borrow().clone());
+        rsx! {
+            ApplicationFormView {
+                mode_label: "Add",
+                name,
+                implementation,
+                base_url,
+                api_key,
+                sync_level,
+                errors,
+                test_result: None,
+                on_name_change: move |_value: String| {},
+                on_implementation_change: move |_value: String| {},
+                on_base_url_change: move |_value: String| {},
+                on_api_key_change: move |_value: String| {},
+                on_sync_level_change: move |_value: String| {},
+                on_test: move |()| {},
+                on_save: move |()| {},
+                on_cancel: move |()| {},
+            }
+        }
+    }
+
+    IMPLEMENTATION.with(|cell| *cell.borrow_mut() = implementation.to_string());
+    NAME.with(|cell| *cell.borrow_mut() = name.to_string());
+    BASE_URL.with(|cell| *cell.borrow_mut() = base_url.to_string());
+    API_KEY.with(|cell| *cell.borrow_mut() = api_key.to_string());
+    SYNC_LEVEL.with(|cell| *cell.borrow_mut() = sync_level);
+    ERRORS.with(|cell| *cell.borrow_mut() = errors);
+    let mut vdom = VirtualDom::new(root);
+    vdom.rebuild_in_place();
+    dioxus::ssr::render(&vdom)
+}
+
+/// See [`indexer_list_view_html`]'s own doc comment — same restriction, for
+/// [`ApplicationTestOutcomeView`] (`Option<ApplicationTestOutcome>` alone
+/// needs no `thread_local` juggling beyond what `banner_html` already does
+/// for a `String`).
+fn application_test_outcome_view_html(outcome: Option<ApplicationTestOutcome>) -> String {
+    thread_local! {
+        static OUTCOME: RefCell<Option<ApplicationTestOutcome>> = const { RefCell::new(None) };
+    }
+
+    fn root() -> Element {
+        let outcome = OUTCOME.with(|cell| cell.borrow().clone());
+        rsx! {
+            ApplicationTestOutcomeView { outcome }
+        }
+    }
+
+    OUTCOME.with(|cell| *cell.borrow_mut() = outcome);
+    let mut vdom = VirtualDom::new(root);
+    vdom.rebuild_in_place();
+    dioxus::ssr::render(&vdom)
+}
+
 fn snapshot_path(name: &str) -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/snapshots")).join(name)
 }
@@ -376,5 +534,106 @@ fn test_outcome_view_renders_a_problem_message_on_failure() {
     assert_eq!(
         test_outcome_view_html(Some(TestOutcome::Failed("bad request".to_string()))),
         r#"<span class="test-result test-result-failed">bad request</span>"#
+    );
+}
+
+#[test]
+fn applications_list_with_two_apps_one_carrying_a_sync_error_matches_its_snapshot() {
+    let applications = vec![
+        fixture_application(1, "My Sonarr", "Sonarr"),
+        ApplicationResource {
+            sync_error: Some(
+                "unexpected status 500 from http://radarr.example/api/v3/system/status".to_string(),
+            ),
+            ..fixture_application(2, "My Radarr", "Radarr")
+        },
+    ];
+    let html = application_list_view_html(applications, None, HashMap::new());
+    let expected = fs::read_to_string(snapshot_path("applications_list.html"))
+        .expect("reading tests/snapshots/applications_list.html");
+    assert_eq!(html, expected.trim_end(), "rendered HTML was:\n{html}");
+}
+
+#[test]
+fn applications_list_with_a_pending_delete_confirmation_matches_its_snapshot() {
+    let applications = vec![fixture_application(1, "My Sonarr", "Sonarr")];
+    let html = application_list_view_html(applications, Some(1), HashMap::new());
+    let expected = fs::read_to_string(snapshot_path("applications_list_confirm_delete.html"))
+        .expect("reading tests/snapshots/applications_list_confirm_delete.html");
+    assert_eq!(html, expected.trim_end(), "rendered HTML was:\n{html}");
+}
+
+#[test]
+fn applications_add_form_for_sonarr_matches_its_snapshot() {
+    let html = application_form_view_html(
+        "Sonarr",
+        "My Sonarr",
+        "http://sonarr.example",
+        "secretkey",
+        SyncLevel::FullSync,
+        Vec::new(),
+    );
+    let expected = fs::read_to_string(snapshot_path("applications_form_sonarr.html"))
+        .expect("reading tests/snapshots/applications_form_sonarr.html");
+    assert_eq!(html, expected.trim_end(), "rendered HTML was:\n{html}");
+}
+
+#[test]
+fn applications_add_form_for_radarr_matches_its_snapshot() {
+    let html = application_form_view_html(
+        "Radarr",
+        "My Radarr",
+        "http://radarr.example",
+        "secretkey",
+        SyncLevel::AddOnly,
+        Vec::new(),
+    );
+    let expected = fs::read_to_string(snapshot_path("applications_form_radarr.html"))
+        .expect("reading tests/snapshots/applications_form_radarr.html");
+    assert_eq!(html, expected.trim_end(), "rendered HTML was:\n{html}");
+}
+
+#[test]
+fn applications_form_with_validation_errors_matches_its_snapshot() {
+    let html = application_form_view_html(
+        "Sonarr",
+        "",
+        "not a url",
+        "",
+        SyncLevel::Disabled,
+        vec![
+            "Name is required".to_string(),
+            "Base URL \"not a url\" is not a valid URL".to_string(),
+            "API key is required".to_string(),
+        ],
+    );
+    let expected = fs::read_to_string(snapshot_path("applications_form_invalid.html"))
+        .expect("reading tests/snapshots/applications_form_invalid.html");
+    assert_eq!(html, expected.trim_end(), "rendered HTML was:\n{html}");
+}
+
+#[test]
+fn application_test_outcome_view_renders_nothing_when_no_test_has_run() {
+    assert_eq!(application_test_outcome_view_html(None), "");
+}
+
+#[test]
+fn application_test_outcome_view_renders_a_success_note() {
+    assert_eq!(
+        application_test_outcome_view_html(Some(ApplicationTestOutcome::Ok)),
+        r#"<span class="test-result test-result-ok">Test succeeded</span>"#
+    );
+}
+
+#[test]
+fn application_test_outcome_view_renders_a_problem_message_on_failure() {
+    assert_eq!(
+        application_test_outcome_view_html(Some(ApplicationTestOutcome::Failed(
+            "unexpected status 500 from http://sonarr.example/api/v3/system/status".to_string()
+        ))),
+        concat!(
+            r#"<span class="test-result test-result-failed">"#,
+            "unexpected status 500 from http://sonarr.example/api/v3/system/status</span>",
+        )
     );
 }
