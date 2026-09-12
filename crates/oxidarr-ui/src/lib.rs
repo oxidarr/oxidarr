@@ -14,23 +14,23 @@
 //! [`api`] and [`dto`] are wasm-independent by design: neither imports
 //! `dioxus`, so both compile and their tests run on any native target,
 //! proven by this crate's own `cargo test` needing no wasm toolchain at
-//! all. [`fetch`] is the one `wasm32`-only module — see its own doc
-//! comment for why it stays an empty placeholder for now.
-
-use dioxus::prelude::*;
+//! all. [`fetch`] is the one `wasm32`-only module (the real `Http` transport,
+//! backed by `gloo-net`); [`key_store`] is `cfg`-based instead of
+//! `wasm32`-gated (a thread-local in-memory store natively, so its own
+//! tests need no wasm target either). [`app`] wires the router, the shared
+//! [`api::ApiClient`]/key-presence state, and the key-prompt/error-banner
+//! seam together; [`components`] and [`screens`] hold the individual
+//! views — each view's own props-driven rendering is what
+//! `tests/snapshots.rs`'s SSR pins exercise, natively, per this workspace's
+//! testing design.
 
 pub mod api;
+mod app;
+pub mod components;
 pub mod dto;
 #[cfg(target_arch = "wasm32")]
 mod fetch;
+pub mod key_store;
+pub mod screens;
 
-/// The app's root component. Scaffolding only for now: a static shell with
-/// a marker `id` later tasks' views replace piece by piece, and later
-/// tests (SSR render-to-string snapshots, per the design doc) can select
-/// on.
-#[component]
-pub fn App() -> Element {
-    rsx! {
-        div { id: "oxidarr-app", "Loading Oxidarr…" }
-    }
-}
+pub use app::{App, Route};
