@@ -79,6 +79,41 @@ impl ReqwestClient {
             .map_err(|err| HttpError::Transport(err.to_string()))?;
         Ok(Self { client })
     }
+
+    /// Builds a `ReqwestClient` identical to [`new`](Self::new), optionally
+    /// routed through a proxy.
+    ///
+    /// `proxy`, when `Some`, is handed to [`reqwest::Proxy::all`] verbatim —
+    /// `reqwest` itself sniffs the scheme (`http://`/`https://` for an HTTP
+    /// proxy, `socks5://`/`socks5h://` for a SOCKS proxy), so this
+    /// constructor does not need to distinguish them. `None` builds a plain
+    /// client with no proxy configured, identical to [`new`](Self::new).
+    ///
+    /// `oxidarr-prowl`'s binary wires this to its own tracker-bound client
+    /// only (see `AppState`'s "Two client fields" docs) — application-bound
+    /// traffic (Sonarr/Radarr sync) always uses a plain, unproxied client.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HttpError::Transport`] if `proxy` is `Some` and is not a
+    /// valid proxy URL, or if the underlying `reqwest` client could not be
+    /// constructed for any other reason.
+    pub fn with_proxy(proxy: Option<&str>) -> Result<Self, HttpError> {
+        let mut builder = reqwest::Client::builder()
+            .cookie_store(true)
+            .gzip(true)
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none());
+        if let Some(proxy_url) = proxy {
+            let proxy = reqwest::Proxy::all(proxy_url)
+                .map_err(|err| HttpError::Transport(err.to_string()))?;
+            builder = builder.proxy(proxy);
+        }
+        let client = builder
+            .build()
+            .map_err(|err| HttpError::Transport(err.to_string()))?;
+        Ok(Self { client })
+    }
 }
 
 impl fmt::Debug for ReqwestClient {
@@ -279,6 +314,27 @@ mod tests {
     fn with_cookie_builds_a_client_without_error() {
         let base: url::Url = "https://t.example/".parse().unwrap();
         ReqwestClient::with_cookie(&base, "session=abc123").unwrap();
+    }
+
+    #[test]
+    fn with_proxy_of_none_builds_a_plain_client_without_error() {
+        ReqwestClient::with_proxy(None).unwrap();
+    }
+
+    #[test]
+    fn with_proxy_of_a_valid_http_proxy_builds_without_error() {
+        ReqwestClient::with_proxy(Some("http://127.0.0.1:8080")).unwrap();
+    }
+
+    #[test]
+    fn with_proxy_of_a_valid_socks5_proxy_builds_without_error() {
+        ReqwestClient::with_proxy(Some("socks5://127.0.0.1:1080")).unwrap();
+    }
+
+    #[test]
+    fn with_proxy_of_an_invalid_url_is_a_transport_error() {
+        let err = ReqwestClient::with_proxy(Some("not a valid proxy url")).unwrap_err();
+        assert!(matches!(err, HttpError::Transport(_)), "err was: {err:?}");
     }
 
     #[test]

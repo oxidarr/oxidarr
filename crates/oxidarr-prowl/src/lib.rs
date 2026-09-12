@@ -25,14 +25,20 @@
 //! best-effort, after every write — see [`sync`]'s own module docs for the
 //! full contract and its documented divergence from real Prowlarr's
 //! asynchronous background sync.
+//!
+//! [`config`] is the `oxidarr-prowl` binary's own instance configuration —
+//! a TOML file plus `OXIDARR_*` environment overrides — consumed by
+//! `src/main.rs` to build the [`AppState`] this crate's [`app`] serves.
 
 pub mod api;
+pub mod config;
 pub mod definitions;
 pub mod server;
 pub mod sync;
 pub mod torznab;
 
 pub use api::api_router;
+pub use config::{Config, ConfigError, load_config};
 pub use definitions::{DefinitionError, DefinitionStore};
 pub use server::{AppState, app, router};
 pub use sync::{SyncError, SyncReport, sync_all, sync_application};
