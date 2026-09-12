@@ -187,7 +187,9 @@ impl DefinitionStore {
     // signature symmetric with `get`/`list_ids` (both genuinely async) and
     // free to grow one later (e.g. a refresh that re-stats the directory)
     // without becoming a breaking API change for callers.
-    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
+    // `unused_async_trait_impl` only exists in newer clippys than the pinned
+    // 1.95 toolchain knows; `unknown_lints` keeps the allow valid on both.
+    #[allow(unknown_lints, clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn refresh(&self) -> Result<(), DefinitionError> {
         self.lock_write().clear();
         Ok(())
