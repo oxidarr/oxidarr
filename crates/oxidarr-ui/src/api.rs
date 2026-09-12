@@ -552,6 +552,34 @@ mod tests {
         api.test_indexer(&sample_indexer()).await.unwrap();
     }
 
+    /// The list screen's own Test button used to send whatever
+    /// `IndexerResource` it had fetched straight through, `sync_error`
+    /// included — contradicting `crate::dto::IndexerResource::sync_error`'s
+    /// own doc comment ("Never sent by this client"). Pins the fix at the
+    /// wire level: a resource carrying a `sync_error`, routed through
+    /// `crate::screens::indexers::build_resource_for_test` the way the
+    /// screen's own `on_test` handler now does, must never let that field
+    /// reach `FakeHttp`'s own captured body.
+    #[tokio::test]
+    async fn test_indexer_never_sends_a_carried_sync_error_when_built_via_the_screens_own_helper() {
+        let resource = IndexerResource {
+            sync_error: Some("sync failed: connection refused".to_string()),
+            ..sample_indexer()
+        };
+        let built = crate::screens::indexers::build_resource_for_test(&resource);
+        let fake = FakeHttp::new(vec![Ok((200, "[]".to_string()))]);
+        let api = client(fake, None);
+
+        api.test_indexer(&built).await.unwrap();
+
+        let calls = api.http.calls.borrow();
+        let body = calls[0].body.as_ref().unwrap();
+        assert!(
+            !body.contains("syncError"),
+            "sync_error leaked onto the wire: {body}"
+        );
+    }
+
     #[tokio::test]
     async fn a_401_maps_to_unauthorized_regardless_of_body() {
         let fake = FakeHttp::new(vec![Ok((401, "anything".to_string()))]);
@@ -679,6 +707,31 @@ mod tests {
         assert_eq!(
             calls[0].path,
             "http://oxidarr.local:9696/api/v1/applications/test"
+        );
+    }
+
+    /// See `test_indexer_never_sends_a_carried_sync_error_when_built_via_the_screens_own_helper`'s
+    /// own doc comment — the sibling screen's list Test button had the
+    /// identical bug, fixed by routing through
+    /// `crate::screens::applications::build_resource_for_test`.
+    #[tokio::test]
+    async fn test_application_never_sends_a_carried_sync_error_when_built_via_the_screens_own_helper()
+     {
+        let resource = ApplicationResource {
+            sync_error: Some("unexpected status 500 from http://sonarr.example".to_string()),
+            ..sample_application()
+        };
+        let built = crate::screens::applications::build_resource_for_test(&resource);
+        let fake = FakeHttp::new(vec![Ok((200, "[]".to_string()))]);
+        let api = client(fake, None);
+
+        api.test_application(&built).await.unwrap();
+
+        let calls = api.http.calls.borrow();
+        let body = calls[0].body.as_ref().unwrap();
+        assert!(
+            !body.contains("syncError"),
+            "sync_error leaked onto the wire: {body}"
         );
     }
 

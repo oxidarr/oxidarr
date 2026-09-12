@@ -415,6 +415,14 @@ pub fn Search() -> Element {
     let mut selected_indexer_ids = use_signal(Vec::<i32>::new);
     let mut categories = use_signal(String::new);
     let mut results = use_signal(|| None::<Vec<ReleaseResource>>);
+    // Set once, at the moment a search actually completes — not read
+    // straight from the wall clock at render time (`Utc::now()` inline in
+    // this component's own tail `rsx!` would evaluate fresh on every
+    // render, including ones triggered by unrelated state like a keystroke
+    // in the query field, making `SearchResultsView` re-render on every
+    // one of those too since its own `now` prop would count as "changed"
+    // each time even though the results themselves never did).
+    let mut results_now = use_signal(Utc::now);
 
     // See this module's own doc comment ("Avoiding a `Signal` read guard
     // held across `.await`") for why the client is cloned out of the
@@ -428,6 +436,13 @@ pub fn Search() -> Element {
     let indexer_list = match &*indexers.read() {
         None => return rsx! { p { "Loading…" } },
         Some(Ok(list)) => list.clone(),
+        // `handle_error` writes to `session`'s own `Signal`s during this
+        // component's render body — see `crate::screens::status::Status`'s
+        // own comment on this exact pattern for why that's safe only
+        // because `Search` takes no props (Dioxus's own no-props
+        // memoization is what keeps this from firing on every unrelated
+        // re-render). If `Search` ever gains a prop, move this into a
+        // `use_effect` first.
         Some(Err(err)) => {
             handle_error(err.clone(), &mut session);
             return rsx! {};
@@ -461,14 +476,17 @@ pub fn Search() -> Element {
                 spawn(async move {
                     let mut session = session;
                     match client.search(&params).await {
-                        Ok(list) => results.set(Some(list)),
+                        Ok(list) => {
+                            results_now.set(Utc::now());
+                            results.set(Some(list));
+                        }
                         Err(err) => handle_error(err, &mut session),
                     }
                 });
             },
         }
         if let Some(list) = results.read().clone() {
-            SearchResultsView { results: list, now: Utc::now() }
+            SearchResultsView { results: list, now: *results_now.read() }
         }
     }
 }
@@ -596,6 +614,36 @@ mod tests {
             humanize_age(Some(dt("2024-01-01T00:00:00Z")), now),
             "2 years"
         );
+    }
+
+    #[test]
+    fn humanize_age_one_second_under_the_30_day_rung_still_renders_days() {
+        // 29 days, 23:59:59 — one second short of the 30-day rung below.
+        let now = dt("2026-01-30T23:59:59Z");
+        let publish = dt("2026-01-01T00:00:00Z");
+        assert_eq!(humanize_age(Some(publish), now), "29 days");
+    }
+
+    #[test]
+    fn humanize_age_at_exactly_the_30_day_rung_switches_to_months() {
+        let now = dt("2026-01-31T00:00:00Z");
+        let publish = dt("2026-01-01T00:00:00Z");
+        assert_eq!(humanize_age(Some(publish), now), "1 month");
+    }
+
+    #[test]
+    fn humanize_age_one_second_under_the_365_day_rung_still_renders_months() {
+        // 364 days, 23:59:59 — one second short of the 365-day rung.
+        let now = dt("2026-12-31T23:59:59Z");
+        let publish = dt("2026-01-01T00:00:00Z");
+        assert_eq!(humanize_age(Some(publish), now), "12 months");
+    }
+
+    #[test]
+    fn humanize_age_at_exactly_the_365_day_rung_switches_to_years() {
+        let now = dt("2027-01-01T00:00:00Z");
+        let publish = dt("2026-01-01T00:00:00Z");
+        assert_eq!(humanize_age(Some(publish), now), "1 year");
     }
 
     #[test]

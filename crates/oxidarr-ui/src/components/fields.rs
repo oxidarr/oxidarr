@@ -18,6 +18,25 @@
 //! `select`'s value is already documented there as the raw option string,
 //! not an index; this module keeps that convention for every kind that
 //! isn't `checkbox`.
+//!
+//! # `password` never displays its own current value
+//!
+//! Browser-verified defect and its fix: [`render_field`]'s own `password`
+//! branch renders a hardcoded blank `value` — never the `value` parameter
+//! it's actually given — plus a "leave blank to keep the stored value"
+//! hint. `crate::screens::indexers`'s own `initial_form_values` already
+//! blanks this out before it ever reaches here, so this is defense in
+//! depth, not the only place the secret is kept out of the form: even a
+//! caller that got that wrong could never leak it into rendered HTML.
+//! Typed characters still show up as the user types them — the DOM node's
+//! own live value is what the browser actually displays, and this
+//! component's own `value` attribute never changes between renders (always
+//! the literal `""`), so nothing here ever fights that back to blank.
+//! Saving with the field left blank preserves the stored value —
+//! `crate::screens::indexers::preserve_blank_passwords`
+//! (`crate::screens::applications::resolve_api_key` for the sibling
+//! screen's own hand-shaped `apiKey`) is the save-side half of that
+//! contract.
 
 use dioxus::prelude::*;
 use serde_json::Value;
@@ -130,14 +149,30 @@ pub fn render_field(
             }
         }
         "password" => {
+            // Browser-verified defect: this input must never display a
+            // stored secret, so `value` (whatever the caller's own current
+            // state holds — see `crate::screens::indexers`'s own doc
+            // comment on why that state can carry the real secret even
+            // though it must never be *shown*) is deliberately never
+            // reflected here; the literal `""` below is what actually
+            // renders, on every render, so a user's own freshly typed
+            // characters are never fought back to blank either (the DOM
+            // node's own live value is what the browser displays once this
+            // attribute stops changing between renders — see this
+            // function's own module doc comment). Saving with this left
+            // blank preserves the stored value —
+            // `crate::screens::indexers::preserve_blank_passwords` (and
+            // its `crate::screens::applications::resolve_api_key`
+            // counterpart) is the save-side half of that contract.
             let name = field.name.clone();
             rsx! {
                 input {
                     r#type: "password",
                     name: "{field.name}",
-                    value: "{value}",
+                    value: "",
                     oninput: move |event| oninput.call((name.clone(), event.value())),
                 }
+                p { class: "hint", "Leave blank to keep the stored value" }
             }
         }
         _ => {
@@ -313,5 +348,28 @@ mod tests {
         let f = field("magic", None);
         let html = render_field_html(&f, "");
         assert_eq!(html, r#"<input type="text" name="cookie" value=""/>"#);
+    }
+
+    /// Browser-verified defect: a schema's `password` setting must never
+    /// render its actual stored value — regardless of what this function is
+    /// handed as `value` — plus a hint explaining that leaving it blank
+    /// keeps the stored value (`crate::screens::indexers`'s own
+    /// `preserve_blank_passwords` is the save-side half of that same
+    /// contract).
+    #[test]
+    fn render_field_never_shows_a_passwords_actual_value() {
+        let f = field("password", Some(Value::String("s3cret".to_string())));
+        let html = render_field_html(&f, "s3cret");
+        assert!(
+            !html.contains("s3cret"),
+            "the stored secret leaked into rendered HTML: {html}"
+        );
+        assert_eq!(
+            html,
+            concat!(
+                r#"<input type="password" name="cookie" value=""/>"#,
+                r#"<p class="hint">Leave blank to keep the stored value</p>"#,
+            )
+        );
     }
 }

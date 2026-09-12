@@ -15,6 +15,16 @@
   bundle, not the placeholder stub committed at
   crates/oxidarr-ui/dist/index.html.
 
+  The mount div itself must stay empty. dioxus-web 0.7.10 mounts by
+  appending into its root element (dom.rs — there is no
+  set_inner_html("") clearing it first), so any text placed inside
+  #oxidarr-app here would stay on screen, above the mounted app, forever
+  once wasm loads (browser-verified: document.body.innerText kept showing
+  the old placeholder text underneath the real app). The pre-wasm loading
+  message lives in the sibling #oxidarr-loading div instead, hidden by
+  assets/app.css's own "#oxidarr-app:not(:empty) ~ #oxidarr-loading" rule
+  the moment dioxus_web appends the app's own content into #oxidarr-app.
+
   Note for anyone editing this file: dx's own prepare_html does plain
   string replacement over this file's raw text (title placeholder, the
   injected loading script tag before the page's closing body tag) with no
@@ -31,6 +41,7 @@
         <meta charset="UTF-8">
     </head>
     <body>
-        <div id="oxidarr-app">Loading Oxidarr…</div>
+        <div id="oxidarr-app"></div>
+        <div id="oxidarr-loading">Loading Oxidarr…</div>
     </body>
 </html>

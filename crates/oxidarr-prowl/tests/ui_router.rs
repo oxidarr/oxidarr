@@ -149,3 +149,66 @@ async fn the_real_embedded_bundle_serves_the_app_shell() {
     let body = body_text(response).await;
     assert!(body.contains(r#"id="oxidarr-app""#), "body was: {body}");
 }
+
+/// Same freshness caveat as `the_real_embedded_bundle_serves_the_app_shell`
+/// above (ignored everywhere but the `ui` CI job, right after a real
+/// `./scripts/build-ui.sh`). Proves the real, content-hashed JS and wasm
+/// assets a genuine `dx build --release` produces are served with their own
+/// correct content types — `oxidarr_prowl::ui`'s own fixture-backed tests
+/// prove the *rule* (`content_type_for`'s extension table); this proves it
+/// holds for the actual filenames a real build emits, not just a
+/// hand-written fixture's.
+#[ignore = "run in the ui CI job right after ./scripts/build-ui.sh — a local dist/ may be stale"]
+#[tokio::test]
+async fn the_real_embedded_bundles_js_and_wasm_assets_have_their_own_content_types() {
+    let assets_dir = PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../oxidarr-ui/dist/assets"
+    ));
+    let mut js_name = None;
+    let mut wasm_name = None;
+    for entry in std::fs::read_dir(&assets_dir).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        let extension = std::path::Path::new(&name)
+            .extension()
+            .and_then(|ext| ext.to_str());
+        match extension {
+            Some(ext) if ext.eq_ignore_ascii_case("js") => js_name = Some(name.clone()),
+            Some(ext) if ext.eq_ignore_ascii_case("wasm") => wasm_name = Some(name.clone()),
+            _ => {}
+        }
+    }
+    assert!(
+        js_name.is_some(),
+        "expected a .js asset in the built dist at {assets_dir:?}"
+    );
+    assert!(
+        wasm_name.is_some(),
+        "expected a .wasm asset in the built dist at {assets_dir:?}"
+    );
+    let js_name = js_name.unwrap();
+    let wasm_name = wasm_name.unwrap();
+
+    let content_type = |response: &axum::response::Response| {
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    let js_response = oxidarr_prowl::ui::router()
+        .oneshot(get(&format!("/assets/{js_name}")))
+        .await
+        .unwrap();
+    assert_eq!(js_response.status(), StatusCode::OK);
+    assert_eq!(content_type(&js_response), "text/javascript");
+
+    let wasm_response = oxidarr_prowl::ui::router()
+        .oneshot(get(&format!("/assets/{wasm_name}")))
+        .await
+        .unwrap();
+    assert_eq!(wasm_response.status(), StatusCode::OK);
+    assert_eq!(content_type(&wasm_response), "application/wasm");
+}

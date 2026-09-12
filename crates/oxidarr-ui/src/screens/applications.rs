@@ -113,6 +113,25 @@ pub fn field_value(fields: &[Field], name: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Restores the stored `apiKey` value when `draft` is blank — the save-side
+/// half of this screen's own no-prefill contract (see
+/// `crate::components::fields`'s own doc comment: the Edit form's own
+/// `apiKey` input never displays the actual stored key, so a form left
+/// untouched, or typed into and cleared back to blank, both leave `draft`
+/// blank). `fields` is expected to be the [`ApplicationResource`] being
+/// edited's own `fields` — for the Add flow there is nothing stored to
+/// restore, so this is never called there (a blank `apiKey` on Add is
+/// exactly what [`validate_application_form`]'s own "API key is required"
+/// check is for).
+#[must_use]
+pub fn resolve_api_key(fields: &[Field], draft: &str) -> String {
+    if draft.is_empty() {
+        field_value(fields, "apiKey")
+    } else {
+        draft.to_string()
+    }
+}
+
 /// Builds the outbound [`ApplicationResource`] a create/update/test call
 /// sends: `id` carried straight through (`0` for a create — skipped from
 /// the JSON entirely by that field's own `skip_serializing_if`), `fields`
@@ -157,6 +176,25 @@ pub fn build_application_resource(
         ],
         sync_error: None,
     }
+}
+
+/// Builds the outbound `ApplicationResource` the list screen's own Test
+/// button sends: `resource` as fetched, rebuilt through
+/// [`build_application_resource`] (rather than sent straight through) so a
+/// carried [`ApplicationResource::sync_error`] never rides back out on the
+/// wire — see [`build_application_resource`]'s own doc comment and
+/// `crate::screens::indexers::build_resource_for_test`'s identical
+/// reasoning for the sibling screen.
+#[must_use]
+pub fn build_resource_for_test(resource: &ApplicationResource) -> ApplicationResource {
+    build_application_resource(
+        resource.id,
+        &resource.name,
+        &resource.implementation,
+        resource.sync_level,
+        &field_value(&resource.fields, "baseUrl"),
+        &field_value(&resource.fields, "apiKey"),
+    )
 }
 
 /// Human-readable label for a [`SyncLevel`] — the list column and the
@@ -335,13 +373,21 @@ pub fn ApplicationListView(
 /// own doc comment). `errors` is [`validate_application_form`]'s own last
 /// computed result for this form's current values, shown inline above the
 /// buttons rather than round-tripped through a server `400`.
+///
+/// No `api_key` prop: the rendered input's own `value` is a hardcoded
+/// `""`, never bound to anything this component receives — see this
+/// component's own body for why, and `crate::components::fields`'s doc
+/// comment ("password inputs must not prefill the secret") for the same
+/// rule applied to indexer settings. [`Applications`]'s own container
+/// keeps the current draft in a `Signal` purely to build the outbound
+/// payload; there is no honest reason for that draft to also flow into
+/// this view's props when it's never displayed.
 #[component]
 pub fn ApplicationFormView(
     mode_label: String,
     name: String,
     implementation: String,
     base_url: String,
-    api_key: String,
     sync_level: SyncLevel,
     errors: Vec<String>,
     test_result: Option<TestOutcome>,
@@ -403,8 +449,19 @@ pub fn ApplicationFormView(
                     "API key"
                     input {
                         r#type: "password",
-                        value: "{api_key}",
+                        // Browser-verified defect: never display the
+                        // actual stored key, regardless of `api_key` —
+                        // see `crate::components::fields`'s own doc
+                        // comment on why a literal `""` here (rather than
+                        // binding to `api_key`) both hides the secret and
+                        // still lets the user's own typing show up
+                        // (the DOM node's live value, untouched by a
+                        // render whose own attribute never changes).
+                        value: "",
                         oninput: move |event| on_api_key_change.call(event.value()),
+                    }
+                    if mode_label == "Edit" {
+                        p { class: "hint", "Leave blank to keep the stored value" }
                     }
                 }
                 label {
@@ -462,6 +519,12 @@ pub fn Applications() -> Element {
     let list = match &*applications.read() {
         None => return rsx! { p { "Loading…" } },
         Some(Ok(list)) => list.clone(),
+        // `handle_error` writes to `session`'s own `Signal`s during this
+        // component's render body — see
+        // `crate::screens::status::Status`'s own comment on this exact
+        // pattern for why that's safe only because `Applications` takes no
+        // props (Dioxus's own no-props memoization). If `Applications`
+        // ever gains a prop, move this into a `use_effect` first.
         Some(Err(err)) => {
             handle_error(err.clone(), &mut session);
             return rsx! {};
@@ -497,7 +560,12 @@ pub fn Applications() -> Element {
                         draft_name.set(resource.name.clone());
                         draft_implementation.set(resource.implementation.clone());
                         draft_base_url.set(field_value(&resource.fields, "baseUrl"));
-                        draft_api_key.set(field_value(&resource.fields, "apiKey"));
+                        // Never seed the actual stored key — see
+                        // `crate::components::fields`'s own doc comment
+                        // and `resolve_api_key`, this screen's own
+                        // save-side fallback that restores it from
+                        // `resource.fields` when this is left blank.
+                        draft_api_key.set(String::new());
                         draft_sync_level.set(resource.sync_level);
                         form_errors.set(Vec::new());
                         form_test_result.set(None);
@@ -521,9 +589,15 @@ pub fn Applications() -> Element {
                 on_delete_cancel: move |()| confirm_delete_id.set(None),
                 on_test: move |id: i32| {
                     let Some(resource) = find(id) else { return };
+                    // `resource` as fetched may carry a `sync_error` from a
+                    // previous write — route it through the same builder
+                    // pattern `crate::screens::indexers`'s own
+                    // `build_resource_for_test` uses, so it never rides
+                    // back out on the outbound test payload.
+                    let built = build_resource_for_test(&resource);
                     let client = api.read().clone();
                     spawn(async move {
-                        let outcome = match client.test_application(&resource).await {
+                        let outcome = match client.test_application(&built).await {
                             Ok(()) => TestOutcome::Ok,
                             Err(err) => TestOutcome::Failed(test_failure_message(err)),
                         };
@@ -538,7 +612,6 @@ pub fn Applications() -> Element {
                 name: draft_name.read().clone(),
                 implementation: draft_implementation.read().clone(),
                 base_url: draft_base_url.read().clone(),
-                api_key: draft_api_key.read().clone(),
                 sync_level: *draft_sync_level.read(),
                 errors: form_errors.read().clone(),
                 test_result: form_test_result.read().clone(),
@@ -621,7 +694,6 @@ pub fn Applications() -> Element {
                     name: draft_name.read().clone(),
                     implementation: draft_implementation.read().clone(),
                     base_url: draft_base_url.read().clone(),
-                    api_key: draft_api_key.read().clone(),
                     sync_level: *draft_sync_level.read(),
                     errors: form_errors.read().clone(),
                     test_result: form_test_result.read().clone(),
@@ -634,64 +706,72 @@ pub fn Applications() -> Element {
                             draft_sync_level.set(level);
                         }
                     },
-                    on_test: move |()| {
-                        let errors = validate_application_form(
-                            &draft_name.read(),
-                            &draft_base_url.read(),
-                            &draft_api_key.read(),
-                        );
-                        if !errors.is_empty() {
-                            form_errors.set(errors);
-                            return;
-                        }
-                        form_errors.set(Vec::new());
-                        let built = build_application_resource(
-                            resource_id,
-                            &draft_name.read(),
-                            &draft_implementation.read(),
-                            *draft_sync_level.read(),
-                            &draft_base_url.read(),
-                            &draft_api_key.read(),
-                        );
-                        let client = api.read().clone();
-                        spawn(async move {
-                            let outcome = match client.test_application(&built).await {
-                                Ok(()) => TestOutcome::Ok,
-                                Err(err) => TestOutcome::Failed(test_failure_message(err)),
-                            };
-                            form_test_result.set(Some(outcome));
-                        });
-                    },
-                    on_save: move |()| {
-                        let errors = validate_application_form(
-                            &draft_name.read(),
-                            &draft_base_url.read(),
-                            &draft_api_key.read(),
-                        );
-                        if !errors.is_empty() {
-                            form_errors.set(errors);
-                            return;
-                        }
-                        form_errors.set(Vec::new());
-                        let built = build_application_resource(
-                            resource_id,
-                            &draft_name.read(),
-                            &draft_implementation.read(),
-                            *draft_sync_level.read(),
-                            &draft_base_url.read(),
-                            &draft_api_key.read(),
-                        );
-                        let client = api.read().clone();
-                        spawn(async move {
-                            let mut session = session;
-                            match client.update_application(&built).await {
-                                Ok(_) => {
-                                    applications.restart();
-                                    state.set(ScreenState::List);
-                                }
-                                Err(err) => handle_error(err, &mut session),
+                    on_test: {
+                        let resource = resource.clone();
+                        move |()| {
+                            let api_key = resolve_api_key(&resource.fields, &draft_api_key.read());
+                            let errors = validate_application_form(
+                                &draft_name.read(),
+                                &draft_base_url.read(),
+                                &api_key,
+                            );
+                            if !errors.is_empty() {
+                                form_errors.set(errors);
+                                return;
                             }
-                        });
+                            form_errors.set(Vec::new());
+                            let built = build_application_resource(
+                                resource_id,
+                                &draft_name.read(),
+                                &draft_implementation.read(),
+                                *draft_sync_level.read(),
+                                &draft_base_url.read(),
+                                &api_key,
+                            );
+                            let client = api.read().clone();
+                            spawn(async move {
+                                let outcome = match client.test_application(&built).await {
+                                    Ok(()) => TestOutcome::Ok,
+                                    Err(err) => TestOutcome::Failed(test_failure_message(err)),
+                                };
+                                form_test_result.set(Some(outcome));
+                            });
+                        }
+                    },
+                    on_save: {
+                        let resource = resource.clone();
+                        move |()| {
+                            let api_key = resolve_api_key(&resource.fields, &draft_api_key.read());
+                            let errors = validate_application_form(
+                                &draft_name.read(),
+                                &draft_base_url.read(),
+                                &api_key,
+                            );
+                            if !errors.is_empty() {
+                                form_errors.set(errors);
+                                return;
+                            }
+                            form_errors.set(Vec::new());
+                            let built = build_application_resource(
+                                resource_id,
+                                &draft_name.read(),
+                                &draft_implementation.read(),
+                                *draft_sync_level.read(),
+                                &draft_base_url.read(),
+                                &api_key,
+                            );
+                            let client = api.read().clone();
+                            spawn(async move {
+                                let mut session = session;
+                                match client.update_application(&built).await {
+                                    Ok(_) => {
+                                        applications.restart();
+                                        state.set(ScreenState::List);
+                                    }
+                                    Err(err) => handle_error(err, &mut session),
+                                }
+                            });
+                        }
                     },
                     on_cancel: move |()| state.set(ScreenState::List),
                 }
@@ -791,6 +871,26 @@ mod tests {
             "secretkey",
         );
         assert_eq!(rebuilt.sync_error, None);
+    }
+
+    #[test]
+    fn build_resource_for_test_strips_a_carried_sync_error() {
+        let resource = ApplicationResource {
+            sync_error: Some("unexpected status 500 from http://sonarr.example".to_string()),
+            ..sample_application()
+        };
+        assert_eq!(build_resource_for_test(&resource).sync_error, None);
+    }
+
+    #[test]
+    fn build_resource_for_test_keeps_the_resources_own_base_url_and_api_key() {
+        let resource = sample_application();
+        let built = build_resource_for_test(&resource);
+        assert_eq!(
+            field_value(&built.fields, "baseUrl"),
+            "http://sonarr.example"
+        );
+        assert_eq!(field_value(&built.fields, "apiKey"), "secretkey");
     }
 
     #[test]
@@ -908,5 +1008,30 @@ mod tests {
             test_failure_message(crate::api::UiError::Network("refused".to_string())),
             "Network error: refused"
         );
+    }
+
+    // --- apiKey masking: no prefill, blank-on-save preserves the stored value ---
+    //
+    // See `crate::components::fields`'s own doc comment ("password inputs
+    // must not prefill the secret") — `apiKey` here is this screen's own
+    // hand-shaped equivalent (see this module's own doc comment for why
+    // it's a `fields[]` entry with `kind: "textbox"` on the wire despite
+    // rendering as a password input).
+
+    #[test]
+    fn resolve_api_key_restores_the_stored_value_when_the_draft_is_blank() {
+        let fields = vec![field("apiKey", "secretkey")];
+        assert_eq!(resolve_api_key(&fields, ""), "secretkey");
+    }
+
+    #[test]
+    fn resolve_api_key_keeps_a_freshly_typed_replacement() {
+        let fields = vec![field("apiKey", "secretkey")];
+        assert_eq!(resolve_api_key(&fields, "newkey"), "newkey");
+    }
+
+    #[test]
+    fn resolve_api_key_with_nothing_stored_and_a_blank_draft_stays_blank() {
+        assert_eq!(resolve_api_key(&[], ""), "");
     }
 }

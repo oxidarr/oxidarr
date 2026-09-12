@@ -22,7 +22,11 @@
 //! `tests/snapshots/status.html` — read side by side with a diff tool, a
 //! changed row is easy to see, unlike a changed substring inside one giant
 //! `assert_eq!` argument. The other screens (indexers/applications/search)
-//! follow the same rule: one screen, one `tests/snapshots/<screen>.html`.
+//! follow the same rule: each gets its own `tests/snapshots/<screen>_*.html`
+//! file per distinct scenario worth pinning (a list with a disabled/
+//! sync-erroring row, a pending delete confirmation, an add form, ...) —
+//! not one file per screen; a screen with several meaningfully different
+//! states is exactly why there's more than one.
 //!
 //! # Constructing a [`VirtualDom`] for a props-driven component
 //!
@@ -61,7 +65,8 @@ use oxidarr_ui::screens::applications::{
     TestOutcomeView as ApplicationTestOutcomeView,
 };
 use oxidarr_ui::screens::indexers::{
-    IndexerFormView, IndexerListView, TestOutcome, TestOutcomeView,
+    IndexerFormView, IndexerListView, TestOutcome, TestOutcomeView, initial_form_values,
+    merge_field_metadata,
 };
 use oxidarr_ui::screens::search::{SearchFormView, SearchResultsView, SearchResultsViewProps};
 use oxidarr_ui::screens::status::{StatusView, StatusViewProps};
@@ -136,6 +141,7 @@ fn status_view_html() -> String {
             fixture_indexer(1, "Example One"),
             fixture_indexer(2, "Example Two"),
         ],
+        definitions_count: 5,
         origin: "http://oxidarr.local:9696".to_string(),
     };
     let mut vdom = VirtualDom::new_with_props(StatusView, props);
@@ -318,39 +324,41 @@ fn application_list_view_html(
 }
 
 /// See [`application_list_view_html`]'s own doc comment — same restriction,
-/// same `thread_local` workaround, for [`ApplicationFormView`].
+/// same `thread_local` workaround, for [`ApplicationFormView`]. No `api_key`
+/// parameter: that prop no longer exists on the view at all (its own input
+/// always renders a hardcoded blank value — see that component's own doc
+/// comment), so there is nothing here for a fixture to carry.
 #[allow(clippy::too_many_arguments)]
 fn application_form_view_html(
+    mode_label: &str,
     implementation: &str,
     name: &str,
     base_url: &str,
-    api_key: &str,
     sync_level: SyncLevel,
     errors: Vec<String>,
 ) -> String {
     thread_local! {
+        static MODE_LABEL: RefCell<String> = const { RefCell::new(String::new()) };
         static IMPLEMENTATION: RefCell<String> = const { RefCell::new(String::new()) };
         static NAME: RefCell<String> = const { RefCell::new(String::new()) };
         static BASE_URL: RefCell<String> = const { RefCell::new(String::new()) };
-        static API_KEY: RefCell<String> = const { RefCell::new(String::new()) };
         static SYNC_LEVEL: RefCell<SyncLevel> = const { RefCell::new(SyncLevel::Disabled) };
         static ERRORS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     }
 
     fn root() -> Element {
+        let mode_label = MODE_LABEL.with(|cell| cell.borrow().clone());
         let implementation = IMPLEMENTATION.with(|cell| cell.borrow().clone());
         let name = NAME.with(|cell| cell.borrow().clone());
         let base_url = BASE_URL.with(|cell| cell.borrow().clone());
-        let api_key = API_KEY.with(|cell| cell.borrow().clone());
         let sync_level = SYNC_LEVEL.with(|cell| *cell.borrow());
         let errors = ERRORS.with(|cell| cell.borrow().clone());
         rsx! {
             ApplicationFormView {
-                mode_label: "Add",
+                mode_label,
                 name,
                 implementation,
                 base_url,
-                api_key,
                 sync_level,
                 errors,
                 test_result: None,
@@ -366,10 +374,10 @@ fn application_form_view_html(
         }
     }
 
+    MODE_LABEL.with(|cell| *cell.borrow_mut() = mode_label.to_string());
     IMPLEMENTATION.with(|cell| *cell.borrow_mut() = implementation.to_string());
     NAME.with(|cell| *cell.borrow_mut() = name.to_string());
     BASE_URL.with(|cell| *cell.borrow_mut() = base_url.to_string());
-    API_KEY.with(|cell| *cell.borrow_mut() = api_key.to_string());
     SYNC_LEVEL.with(|cell| *cell.borrow_mut() = sync_level);
     ERRORS.with(|cell| *cell.borrow_mut() = errors);
     let mut vdom = VirtualDom::new(root);
@@ -626,6 +634,84 @@ fn add_form_for_a_fixture_schema_entry_renders_its_select_options() {
     );
 }
 
+/// Browser-verified defect (items 2 and 3): `GET /api/v1/indexer`
+/// reconstructs `fields[]` from the settings map alone — no
+/// `selectOptions`, no real labels, `kind` only ever `"checkbox"`/
+/// `"textbox"`. Rendering the Edit form straight from that response would
+/// degrade `sort` to free text and render `passkey` as a plain cleartext
+/// `type="text"` input. This proves the full fix: merging the schema
+/// entry's own metadata (`merge_field_metadata`) recovers a real `<select>`
+/// with its options and a real `type="password"` input, and that password
+/// input never shows the stored secret regardless.
+#[test]
+fn edit_form_recovers_schema_metadata_and_masks_a_password_setting() {
+    let schema_fields = vec![
+        Field {
+            name: "sort".to_string(),
+            label: "Sort by".to_string(),
+            kind: "select".to_string(),
+            value: Some(serde_json::Value::String("seeders".to_string())),
+            select_options: Some(vec![
+                SelectOption {
+                    value: 0,
+                    name: "seeders".to_string(),
+                },
+                SelectOption {
+                    value: 1,
+                    name: "created".to_string(),
+                },
+            ]),
+        },
+        Field {
+            name: "passkey".to_string(),
+            label: "Passkey".to_string(),
+            kind: "password".to_string(),
+            value: None,
+            select_options: None,
+        },
+    ];
+    // What `GET /api/v1/indexer` actually sends back for this same
+    // indexer: reconstructed, generic metadata, but the real stored
+    // values.
+    let stored_fields = vec![
+        Field {
+            name: "sort".to_string(),
+            label: "sort".to_string(),
+            kind: "textbox".to_string(),
+            value: Some(serde_json::Value::String("created".to_string())),
+            select_options: None,
+        },
+        Field {
+            name: "passkey".to_string(),
+            label: "passkey".to_string(),
+            kind: "textbox".to_string(),
+            value: Some(serde_json::Value::String("secretkey".to_string())),
+            select_options: None,
+        },
+    ];
+
+    let merged = merge_field_metadata(&schema_fields, &stored_fields);
+    let values = initial_form_values(&merged, &schema_fields);
+    let html = indexer_form_view_html(merged, values);
+
+    assert!(
+        html.contains(r#"<select name="sort""#),
+        "expected the sort field to render as a real <select>, html was:\n{html}"
+    );
+    assert!(
+        html.contains(r#"<option value="created" selected=true>created</option>"#),
+        "expected the select's own options, carrying the current stored value, html was:\n{html}"
+    );
+    assert!(
+        html.contains(r#"<input type="password" name="passkey" value=""/>"#),
+        "expected the passkey field to render as a real, blank password input, html was:\n{html}"
+    );
+    assert!(
+        !html.contains("secretkey"),
+        "the stored secret must never render, html was:\n{html}"
+    );
+}
+
 #[test]
 fn test_outcome_view_renders_nothing_when_no_test_has_run() {
     assert_eq!(test_outcome_view_html(None), "");
@@ -676,10 +762,10 @@ fn applications_list_with_a_pending_delete_confirmation_matches_its_snapshot() {
 #[test]
 fn applications_add_form_for_sonarr_matches_its_snapshot() {
     let html = application_form_view_html(
+        "Add",
         "Sonarr",
         "My Sonarr",
         "http://sonarr.example",
-        "secretkey",
         SyncLevel::FullSync,
         Vec::new(),
     );
@@ -691,10 +777,10 @@ fn applications_add_form_for_sonarr_matches_its_snapshot() {
 #[test]
 fn applications_add_form_for_radarr_matches_its_snapshot() {
     let html = application_form_view_html(
+        "Add",
         "Radarr",
         "My Radarr",
         "http://radarr.example",
-        "secretkey",
         SyncLevel::AddOnly,
         Vec::new(),
     );
@@ -706,10 +792,10 @@ fn applications_add_form_for_radarr_matches_its_snapshot() {
 #[test]
 fn applications_form_with_validation_errors_matches_its_snapshot() {
     let html = application_form_view_html(
+        "Add",
         "Sonarr",
         "",
         "not a url",
-        "",
         SyncLevel::Disabled,
         vec![
             "Name is required".to_string(),
@@ -720,6 +806,34 @@ fn applications_form_with_validation_errors_matches_its_snapshot() {
     let expected = fs::read_to_string(snapshot_path("applications_form_invalid.html"))
         .expect("reading tests/snapshots/applications_form_invalid.html");
     assert_eq!(html, expected.trim_end(), "rendered HTML was:\n{html}");
+}
+
+#[test]
+fn applications_edit_form_never_shows_the_stored_api_key_and_hints_leaving_it_blank() {
+    // Browser-verified defect (item 3's applications half): the Edit
+    // form's own API key input must never display the actual stored
+    // secret, and must explain that leaving it blank keeps the stored
+    // value — unlike Add, where there is nothing stored to keep.
+    let html = application_form_view_html(
+        "Edit",
+        "Sonarr",
+        "My Sonarr",
+        "http://sonarr.example",
+        SyncLevel::FullSync,
+        Vec::new(),
+    );
+    assert!(
+        !html.contains("secretkey"),
+        "the stored api key must never render, html was:\n{html}"
+    );
+    assert!(
+        html.contains(r#"<input type="password" value=""/>"#),
+        "expected a blank password input, html was:\n{html}"
+    );
+    assert!(
+        html.contains(r#"<p class="hint">Leave blank to keep the stored value</p>"#),
+        "expected the leave-blank hint in Edit mode, html was:\n{html}"
+    );
 }
 
 #[test]

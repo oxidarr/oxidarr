@@ -1,0 +1,3 @@
+/* fixture: a nested asset, proving router_from_dir serves sub-paths under
+   assets/ correctly, not just top-level files. */
+body { margin: 0; }

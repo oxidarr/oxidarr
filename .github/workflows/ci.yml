@@ -37,6 +37,13 @@ jobs:
       - name: Add the wasm32 target
         run: rustup target add wasm32-unknown-unknown
       - name: Install dioxus-cli
+        # The workflow-level `RUSTFLAGS: -D warnings` above is meant for
+        # this repo's own crates, not the ~600 third-party crates this
+        # install compiles — one upstream warning anywhere in that tree
+        # would otherwise kill this job. Scoped to just this step; every
+        # other step keeps the workflow-level `-D warnings`.
+        env:
+          RUSTFLAGS: ""
         run: cargo install dioxus-cli --version 0.7.10 --locked
       - name: Build the web ui bundle
         # Runs `dx build --release` in crates/oxidarr-ui and copies its real
@@ -51,9 +58,12 @@ jobs:
         # build.rs). This step instead guards against the previous step
         # having silently produced a *stale* or wrong bundle (e.g. a cache
         # restore, or a dx regression that no-ops without erroring): if
-        # dist/index.html doesn't carry the real app's own marker, or does
-        # carry the literal string CI's own grep looks for below, something
-        # upstream is wrong even though the build itself "succeeded".
+        # dist/index.html doesn't carry the real app's own marker, something
+        # upstream is wrong even though the build itself "succeeded". The
+        # second grep is a tripwire, not a check against anything that
+        # exists today: it fails the build if a placeholder stub (marked
+        # with the literal string "oxidarr-ui-stub") is ever committed to
+        # crates/oxidarr-ui/dist again in the future.
         working-directory: crates/oxidarr-ui
         run: |
           grep -q 'id="oxidarr-app"' dist/index.html

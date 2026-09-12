@@ -118,14 +118,44 @@ fn serve(dir: &'static Dir<'static>, method: &Method, uri: &Uri) -> Response {
     if is_reserved_path(path) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let path = path.trim_start_matches('/');
-    match dir.get_file(path).or_else(|| dir.get_file("index.html")) {
+    let trimmed = path.trim_start_matches('/');
+    if let Some(file) = dir.get_file(trimmed) {
+        return file_response(file);
+    }
+    if looks_like_an_asset_path(path) {
+        // A path shaped like an asset request (under `/assets/`, or simply
+        // carrying a file extension) that isn't actually in `dir` must
+        // never fall back to the SPA shell: a stale `index.html` (an old
+        // build still cached somewhere) referencing an asset filename a
+        // fresh build renamed (every asset here is content-hashed) would
+        // otherwise get a `200 text/html` back for what it requested as a
+        // script/wasm/style — an unreadable failure mode (see the module
+        // docs). A genuine SPA route never carries a file extension, so
+        // this never misclassifies one of those.
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match dir.get_file("index.html") {
         Some(file) => file_response(file),
         // Only reachable if `dir` has no `index.html` at all — a
         // misbuilt/misplaced bundle, not a state any real `dx build`
         // output or `tests/fixtures/ui-bundle` leaves this in.
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// True for a path this router should never answer with the SPA shell when
+/// the exact file isn't found — see [`serve`]'s own doc comment. Two
+/// families, either sufficient on its own: under `/assets/` (where every
+/// real Dioxus web build's own JS/wasm/css assets live), or the path's own
+/// last segment carries a `.` (a file extension) — a genuine client-side
+/// route never does, so this never misclassifies one of those.
+fn looks_like_an_asset_path(path: &str) -> bool {
+    if path == "/assets" || path.starts_with("/assets/") {
+        return true;
+    }
+    path.rsplit('/')
+        .next()
+        .is_some_and(|last| last.contains('.'))
 }
 
 /// True for any path this crate's own API surface owns — see the module
@@ -234,6 +264,59 @@ mod tests {
             .unwrap_or_default()
             .to_string();
         assert_eq!(content_type, "text/css");
+    }
+
+    /// Proves nested-path serving works, not just top-level files —
+    /// `FIXTURE` carries a real `assets/app.css` (distinct from the
+    /// top-level `app.css` `a_known_asset_is_served_with_its_own_content_type`
+    /// already covers) for exactly this.
+    #[tokio::test]
+    async fn a_nested_asset_path_is_served_with_its_own_content_type() {
+        let router = router_from_dir(&FIXTURE);
+
+        let response = router.oneshot(get("/assets/app.css")).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(content_type, "text/css");
+        let body = body_text(response).await;
+        assert!(body.contains("margin: 0"), "body was: {body}");
+    }
+
+    /// A stale bundle (an old `index.html` referencing an asset filename
+    /// that no longer exists after a fresh build changed its content hash)
+    /// must 404 for that missing asset, not silently 200 with the SPA
+    /// shell's own HTML — a `text/html` response to what the browser
+    /// requested as a script/wasm/style is an unreadable failure mode (see
+    /// the module docs). Only genuine SPA routes (no file extension, not
+    /// under `/assets/`) fall back to `index.html`.
+    #[tokio::test]
+    async fn a_missing_asset_path_404s_instead_of_falling_back_to_the_spa_shell() {
+        let router = router_from_dir(&FIXTURE);
+
+        let response = router
+            .oneshot(get("/assets/does-not-exist.wasm"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Same rule, for a path that looks like an asset (carries a file
+    /// extension) without being under `/assets/` at all — e.g. a
+    /// top-level `favicon.ico` a bundle doesn't actually ship.
+    #[tokio::test]
+    async fn a_missing_path_with_a_file_extension_404s_instead_of_falling_back_to_the_spa_shell() {
+        let router = router_from_dir(&FIXTURE);
+
+        let response = router.oneshot(get("/favicon.ico")).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

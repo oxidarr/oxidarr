@@ -165,9 +165,9 @@ hint what to do about it:
 
 ```
 error: proc macro panicked
-  --> crates/oxidarr-prowl/src/ui.rs:85:29
+  --> crates/oxidarr-prowl/src/ui.rs:88:29
    |
-85 | static DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../oxidarr-ui/dist");
+88 | static DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../oxidarr-ui/dist");
    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: message: ".../crates/oxidarr-ui/dist" is not a directory

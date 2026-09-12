@@ -15,6 +15,17 @@ body {
   padding: 1rem;
 }
 
+/* index.html's own pre-wasm loading message lives in the sibling
+   #oxidarr-loading div, not inside #oxidarr-app itself — dioxus-web mounts
+   by appending into #oxidarr-app rather than clearing it first, so text
+   placed inside that div directly would never go away once the app
+   mounted. This rule hides the loading message the moment #oxidarr-app
+   stops being empty (i.e. the instant the real app's own content is
+   appended into it). */
+#oxidarr-app:not(:empty) ~ #oxidarr-loading {
+  display: none;
+}
+
 nav {
   display: flex;
   gap: 1rem;
