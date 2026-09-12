@@ -1,0 +1,22 @@
+{
+  "id": 7,
+  "name": "My Tracker",
+  "implementation": "Cardigann",
+  "definitionName": "mytracker",
+  "description": "",
+  "language": "",
+  "enable": true,
+  "priority": 25,
+  "capabilities": {
+    "categories": []
+  },
+  "fields": [
+    {
+      "name": "cookie",
+      "label": "cookie",
+      "type": "textbox",
+      "value": "abc123"
+    }
+  ],
+  "syncError": "app 3: connection refused"
+}

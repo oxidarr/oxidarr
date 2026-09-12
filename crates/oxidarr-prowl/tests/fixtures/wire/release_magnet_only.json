@@ -1,0 +1,16 @@
+{
+  "title": "Some.Movie.2026.2160p",
+  "size": 21474836480,
+  "seeders": 120,
+  "leechers": 5,
+  "magnetUrl": "magnet:?xt=urn:btih:abcdef1234567890&dn=Some.Movie.2026.2160p",
+  "indexerId": 2,
+  "indexer": "Private Tracker",
+  "categories": [
+    2000,
+    2040
+  ],
+  "grabs": null,
+  "downloadVolumeFactor": 0.0,
+  "uploadVolumeFactor": 2.0
+}

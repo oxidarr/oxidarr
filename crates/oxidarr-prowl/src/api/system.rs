@@ -86,18 +86,26 @@ pub fn router(start_time: DateTime<Utc>) -> Router {
 /// Prowlarr's `SystemResource`, cut to the fields this server can answer
 /// honestly. See the module doc's field table for what each value is and
 /// why, and for the full list of what's skipped.
+///
+/// `pub` (fields included) so `tests/wire_fixtures.rs` can construct a
+/// sample directly, the same way it does for every other DTO in
+/// [`crate::api::dto`] — see that file's own module docs for why this type
+/// is the one exception that also gets exercised through a real
+/// `GET /system/status` round trip rather than only a bare struct literal
+/// (its `start_time` field is populated by [`router`]'s own state, not a
+/// plain constructor argument).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SystemStatus {
-    app_name: &'static str,
-    instance_name: &'static str,
-    version: &'static str,
-    is_production: bool,
-    is_docker: bool,
-    start_time: String,
-    app_data: &'static str,
-    authentication: &'static str,
-    url_base: &'static str,
+pub struct SystemStatus {
+    pub app_name: &'static str,
+    pub instance_name: &'static str,
+    pub version: &'static str,
+    pub is_production: bool,
+    pub is_docker: bool,
+    pub start_time: String,
+    pub app_data: &'static str,
+    pub authentication: &'static str,
+    pub url_base: &'static str,
 }
 
 async fn status(State(state): State<SystemState>) -> Json<SystemStatus> {

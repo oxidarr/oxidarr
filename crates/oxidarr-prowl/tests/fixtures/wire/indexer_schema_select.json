@@ -1,0 +1,44 @@
+{
+  "name": "Example Tracker",
+  "implementation": "Cardigann",
+  "definitionName": "exampletracker",
+  "description": "An example private tracker definition.",
+  "language": "en-US",
+  "enable": false,
+  "priority": 25,
+  "capabilities": {
+    "categories": [
+      {
+        "id": 5000,
+        "name": "TV"
+      },
+      {
+        "id": 2000,
+        "name": "Movies"
+      }
+    ]
+  },
+  "fields": [
+    {
+      "name": "cookie",
+      "label": "Cookie",
+      "type": "textbox"
+    },
+    {
+      "name": "sort",
+      "label": "Sort by",
+      "type": "select",
+      "value": "seeders",
+      "selectOptions": [
+        {
+          "value": 0,
+          "name": "Seeders"
+        },
+        {
+          "value": 1,
+          "name": "Size"
+        }
+      ]
+    }
+  ]
+}
