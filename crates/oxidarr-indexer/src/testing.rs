@@ -127,6 +127,8 @@ const fn method_str(method: Method) -> &'static str {
     match method {
         Method::Get => "GET",
         Method::Post => "POST",
+        Method::Put => "PUT",
+        Method::Delete => "DELETE",
     }
 }
 

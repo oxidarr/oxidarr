@@ -1,0 +1,8 @@
+id: good
+name: Good Tracker
+search:
+  rows:
+    selector: item
+  fields:
+    title:
+      selector: a

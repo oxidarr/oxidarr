@@ -5,13 +5,41 @@
 //! [`Definition`](oxidarr_cardigann::model::Definition)'s declared
 //! capabilities and [`oxidarr_core::Release`] values. It performs no I/O.
 //!
-//! [`server`] wires that rendering, plus [`oxidarr_db`] and
-//! [`oxidarr_indexer`], into the actual `GET /{indexer_id}/api` Torznab
-//! endpoint — see its module docs for authentication, error-code, and
-//! definition-loading conventions.
+//! [`definitions`] caches parsed Cardigann definitions, read-through, behind
+//! [`DefinitionStore`].
+//!
+//! [`server`] wires that rendering, plus [`oxidarr_db`], [`oxidarr_indexer`],
+//! and [`DefinitionStore`], into the actual `GET /{indexer_id}/api` Torznab
+//! endpoint — see its module docs for authentication and error-code
+//! conventions.
+//!
+//! [`api`] mounts the Prowlarr-compatible `/api/v1` control-plane endpoints
+//! behind [`oxidarr_http::auth::require_api_key`]. [`server::app`] merges it
+//! with the Torznab router into the one application this crate serves.
+//!
+//! [`sync`] is the app-sync engine: it pushes this instance's enabled
+//! indexers into a configured Sonarr/Radarr application as Torznab
+//! indexers, keyed by [`oxidarr_db::MappingRepo`]'s ownership record rather
+//! than by name-matching. [`api::indexers`] and [`api::applications`]'s
+//! create/update (and, for indexers, delete) handlers trigger it inline,
+//! best-effort, after every write — see [`sync`]'s own module docs for the
+//! full contract and its documented divergence from real Prowlarr's
+//! asynchronous background sync.
+//!
+//! [`config`] is the `oxidarr-prowl` binary's own instance configuration —
+//! a TOML file plus `OXIDARR_*` environment overrides — consumed by
+//! `src/main.rs` to build the [`AppState`] this crate's [`app`] serves.
 
+pub mod api;
+pub mod config;
+pub mod definitions;
 pub mod server;
+pub mod sync;
 pub mod torznab;
 
-pub use server::{AppState, router};
+pub use api::api_router;
+pub use config::{Config, ConfigError, load_config};
+pub use definitions::{DefinitionError, DefinitionStore};
+pub use server::{AppState, app, router};
+pub use sync::{SyncError, SyncReport, sync_all, sync_application};
 pub use torznab::{render_caps, render_error, render_results};

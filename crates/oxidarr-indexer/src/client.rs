@@ -11,26 +11,43 @@ use crate::error::HttpError;
 
 /// HTTP method used by an indexer request.
 ///
-/// Cardigann definitions only ever issue GET or POST requests, so this is
-/// intentionally not a full enumeration of HTTP methods.
+/// Cardigann definitions only ever issue GET or POST requests; `Put` and
+/// `Delete` exist purely for `oxidarr-prowl`'s app-sync engine
+/// (`crates/oxidarr-prowl/src/sync.rs`), which speaks Sonarr/Radarr's own
+/// `PUT`/`DELETE /api/v3/indexer/{id}` REST routes through this same
+/// [`HttpClient`] abstraction rather than introducing a second one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     /// HTTP GET.
     Get,
     /// HTTP POST.
     Post,
+    /// HTTP PUT.
+    Put,
+    /// HTTP DELETE.
+    Delete,
 }
 
 /// The body of a request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Body {
     /// A `application/x-www-form-urlencoded` form body, as ordered
     /// key/value pairs.
     Form(Vec<(String, String)>),
+    /// A JSON body, serialized with `Content-Type: application/json`. Used
+    /// by `oxidarr-prowl`'s app-sync engine to speak Sonarr/Radarr's own
+    /// `POST`/`PUT /api/v3/indexer` JSON API — no Cardigann definition ever
+    /// builds one of these.
+    Json(serde_json::Value),
 }
 
 /// A request an [`HttpClient`] can execute.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` only (not `Eq`): [`Body::Json`] wraps a `serde_json::Value`,
+/// which itself is only `PartialEq` (a JSON number can be a float, so total
+/// equality isn't meaningful) — the same reason [`Body`] itself dropped
+/// `Eq`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct HttpRequest {
     /// The HTTP method.
     pub method: Method,
@@ -84,7 +101,7 @@ pub trait HttpClient: Send + Sync {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{HttpClient, HttpError, HttpRequest, Method};
+    use super::{Body, HttpClient, HttpError, HttpRequest, Method};
     use crate::testing::{FakeClient, ok_html};
 
     #[tokio::test]
@@ -136,5 +153,34 @@ mod tests {
             client.execute(req).await,
             Err(HttpError::Transport(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn fake_client_reports_put_and_delete_by_name_in_an_unexpected_request_error() {
+        let client = FakeClient::new();
+        let put = HttpRequest {
+            method: Method::Put,
+            url: "https://t.example/api/v3/indexer/7".parse().unwrap(),
+            headers: vec![],
+            body: Some(Body::Json(serde_json::json!({"id": 7}))),
+            follow_redirects: true,
+        };
+        let delete = HttpRequest {
+            method: Method::Delete,
+            url: "https://t.example/api/v3/indexer/7".parse().unwrap(),
+            headers: vec![],
+            body: None,
+            follow_redirects: true,
+        };
+
+        let put_err = client.execute(put).await.unwrap_err();
+        let delete_err = client.execute(delete).await.unwrap_err();
+
+        assert!(
+            matches!(put_err, HttpError::Transport(msg) if msg.starts_with("unexpected request: PUT "))
+        );
+        assert!(
+            matches!(delete_err, HttpError::Transport(msg) if msg.starts_with("unexpected request: DELETE "))
+        );
     }
 }

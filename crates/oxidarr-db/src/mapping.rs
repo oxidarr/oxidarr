@@ -91,6 +91,31 @@ impl<'a> MappingRepo<'a> {
         rows.iter().map(row_to_mapping).collect()
     }
 
+    /// Lists every mapping for `indexer`, across every application.
+    ///
+    /// Used by `oxidarr-prowl`'s indexer-delete handler to snapshot which
+    /// applications currently map this indexer remotely *before* deleting
+    /// the indexer row: `app_indexer_map.indexer_id` is `ON DELETE CASCADE`
+    /// (see this table's migration), so every one of these rows would
+    /// otherwise vanish the instant the indexer itself is deleted, taking
+    /// the only record of the now-orphaned remote entry's id with it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Corrupt`] if a stored row cannot be decoded, or
+    /// [`DbError::Sqlx`] if the query fails.
+    pub async fn for_indexer(&self, indexer: IndexerId) -> Result<Vec<MappingRow>, DbError> {
+        let rows = sqlx::query(
+            "SELECT app_id, indexer_id, remote_indexer_id
+             FROM app_indexer_map WHERE indexer_id = ? ORDER BY app_id",
+        )
+        .bind(indexer.0)
+        .fetch_all(self.0.pool())
+        .await?;
+
+        rows.iter().map(row_to_mapping).collect()
+    }
+
     /// Deletes the mapping for `(app, indexer)`, if any.
     ///
     /// Unlike [`crate::ApplicationRepo::delete`] and
@@ -293,6 +318,63 @@ mod tests {
             vec![indexer_one, indexer_two]
         );
         assert!(listed.iter().all(|row| row.app_id == app_a));
+    }
+
+    #[tokio::test]
+    async fn for_indexer_lists_only_that_indexers_rows_across_every_app() {
+        let db = Db::open_in_memory().await.unwrap();
+        let (app_a, indexer_one) = seed_parents(&db, "app-a", "indexer-one").await;
+        let indexer_two = IndexerRepo::new(&db)
+            .insert(&sample_new_indexer("indexer-two"))
+            .await
+            .unwrap()
+            .id;
+        let app_b = ApplicationRepo::new(&db)
+            .insert(&sample_new_application("app-b"))
+            .await
+            .unwrap()
+            .id;
+        let repo = MappingRepo::new(&db);
+        repo.set(MappingRow {
+            app_id: app_a,
+            indexer_id: indexer_one,
+            remote_indexer_id: RemoteIndexerId(1),
+        })
+        .await
+        .unwrap();
+        repo.set(MappingRow {
+            app_id: app_b,
+            indexer_id: indexer_one,
+            remote_indexer_id: RemoteIndexerId(2),
+        })
+        .await
+        .unwrap();
+        repo.set(MappingRow {
+            app_id: app_a,
+            indexer_id: indexer_two,
+            remote_indexer_id: RemoteIndexerId(3),
+        })
+        .await
+        .unwrap();
+
+        let listed = repo.for_indexer(indexer_one).await.unwrap();
+
+        assert_eq!(
+            listed.iter().map(|row| row.app_id).collect::<Vec<_>>(),
+            vec![app_a, app_b]
+        );
+        assert!(listed.iter().all(|row| row.indexer_id == indexer_one));
+    }
+
+    #[tokio::test]
+    async fn for_indexer_on_an_unmapped_indexer_returns_empty() {
+        let db = Db::open_in_memory().await.unwrap();
+        let (_, indexer_id) = seed_parents(&db, "app-one", "indexer-one").await;
+        let repo = MappingRepo::new(&db);
+
+        let listed = repo.for_indexer(indexer_id).await.unwrap();
+
+        assert_eq!(listed, Vec::new());
     }
 
     #[tokio::test]

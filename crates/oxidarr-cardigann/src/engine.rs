@@ -27,6 +27,9 @@ use std::collections::{BTreeMap, HashSet};
 /// [`FilterOutcome`]) is skipped entirely rather than emitted with a
 /// partial value.
 ///
+/// `base` is the URL the `details`/`download`/`poster` fields are resolved
+/// against when their extracted value is relative — see [`resolve_url`].
+///
 /// # Errors
 ///
 /// Returns [`CardigannError`] if the definition declares a JSON response, or
@@ -38,6 +41,7 @@ pub fn extract(
     body: &str,
     config: &BTreeMap<String, String>,
     ctx: &FilterCtx,
+    base: &url::Url,
 ) -> Result<Vec<Release>, CardigannError> {
     // Checked from the DECLARED response type, not inferred from selector
     // shape. 95 of the 101 JSON definitions use a bare-identifier row
@@ -80,7 +84,7 @@ pub fn extract(
             scope.set_result(name, &raw);
             values.insert(name.clone(), raw);
         }
-        out.push(build_release(&values, &category_map));
+        out.push(build_release(&values, &category_map, base));
     }
 
     Ok(out)
@@ -287,11 +291,23 @@ fn compile_html_selector(raw: &str) -> Result<selector::CompiledSelector, Cardig
 /// `categorymappings` rows that happen to name the same Newznab category
 /// under different tracker ids do not produce a visibly unordered or
 /// duplicated vector.
-fn build_release(values: &BTreeMap<String, String>, category_map: &CategoryMap) -> Release {
+///
+/// `details`/`download`/`poster` are additionally resolved against `base`
+/// via [`resolve_url`] — see that function's doc comment for the exact
+/// rule and its Jackett citation.
+fn build_release(
+    values: &BTreeMap<String, String>,
+    category_map: &CategoryMap,
+    base: &url::Url,
+) -> Release {
     let get = |k: &str| values.get(k).map(String::as_str).unwrap_or_default();
     let non_empty = |k: &str| {
         let v = get(k);
         (!v.is_empty()).then(|| v.to_string())
+    };
+    let resolved = |k: &str| {
+        let v = get(k);
+        (!v.is_empty()).then(|| resolve_url(base, v))
     };
 
     // `Release` is `#[non_exhaustive]`, which forbids struct-literal
@@ -303,8 +319,8 @@ fn build_release(values: &BTreeMap<String, String>, category_map: &CategoryMap) 
     release.seeders = get("seeders").replace(',', "").parse().ok();
     release.leechers = get("leechers").replace(',', "").parse().ok();
     release.grabs = get("grabs").replace(',', "").parse().ok();
-    release.details_url = non_empty("details");
-    release.download_url = non_empty("download");
+    release.details_url = resolved("details");
+    release.download_url = resolved("download");
     release.magnet_url = non_empty("magnet");
     release.info_hash = non_empty("infohash");
     release.imdb_id = non_empty("imdbid");
@@ -316,7 +332,7 @@ fn build_release(values: &BTreeMap<String, String>, category_map: &CategoryMap) 
     release.download_volume_factor = get("downloadvolumefactor").parse().unwrap_or(1.0);
     release.upload_volume_factor = get("uploadvolumefactor").parse().unwrap_or(1.0);
     release.description = non_empty("description");
-    release.poster = non_empty("poster");
+    release.poster = resolved("poster");
     release.genre = non_empty("genre");
     release.files = get("files").replace(',', "").parse().ok();
     release.minimum_seed_time = get("minimumseedtime").parse().ok();
@@ -326,6 +342,45 @@ fn build_release(values: &BTreeMap<String, String>, category_map: &CategoryMap) 
     categories.dedup();
     release.categories = categories;
     release
+}
+
+/// Resolves a `details`/`download`/`poster` field's extracted value against
+/// `base`.
+///
+/// A value that already parses as an absolute URL — `http(s)://...`, a
+/// `magnet:` URI, or anything else [`url::Url::parse`] accepts on its own —
+/// passes through untouched: `Url::parse` (unlike `Url::join`) has no base
+/// to fall back on, so success there already means "nothing to resolve".
+/// Everything else is joined against `base` (`base.join(value)`), matching
+/// what an ordinary browser does with a relative `href`. A value `base`
+/// cannot make sense of even once joined (e.g. a malformed absolute-looking
+/// URL such as `http://[::1`) is returned verbatim rather than surfacing an
+/// error: one unresolvable URL field must never fail an otherwise-good row.
+///
+/// Jackett parity: `CardigannIndexer.ParseFields`'s `details`/`download`/
+/// `poster` cases each call `resolvePath(value, searchUrlUri)`, where
+/// `resolvePath(path, currentUrl) => new Uri(currentUrl ?? new
+/// Uri(SiteLink), path)` (`CardigannIndexer.cs`) — .NET's `Uri`
+/// relative-resolution constructor, functionally the same operation as
+/// `Url::join` here. The base it resolves against, `searchUrlUri`, is the
+/// URL Jackett itself built and requested for that search path
+/// (`resolvePath(SearchPath.Path, ...)` against `SiteLink`) — the
+/// *pre-redirect* request URL; `FollowIfRedirect` reassigns the response
+/// but never `searchUrlUri`. This engine instead resolves against the
+/// response's post-redirect `final_url` (the caller's `base` argument,
+/// threaded from `HttpResponse::final_url`): a relative `href` is written
+/// by the tracker's page relative to wherever that page actually ended up
+/// being served from, which is what a browser does and is also the rule
+/// this codebase's `login` module already applies to a login form's
+/// `action` (see `oxidarr_indexer::login::submit_login`'s doc comment) —
+/// not a behavioural gap against Jackett, since a search path only
+/// redirects in the same handful of niche cases login pages do.
+fn resolve_url(base: &url::Url, value: &str) -> String {
+    if url::Url::parse(value).is_ok() {
+        return value.to_string();
+    }
+    base.join(value)
+        .map_or_else(|_| value.to_string(), |joined| joined.to_string())
 }
 
 /// Parses a human-readable size such as `1.4 GB` into bytes.
@@ -418,10 +473,26 @@ search:
       selector: td.size
 ";
 
+    /// A stand-in response base for tests that exercise something other
+    /// than URL resolution itself (which has its own dedicated tests
+    /// below) — any valid absolute URL works, since none of the fixture
+    /// HTML in those tests declares a `details`/`download`/`poster` value
+    /// that would visibly change shape once resolved against it.
+    fn test_base() -> url::Url {
+        "https://t.example/browse".parse().unwrap()
+    }
+
     fn releases() -> Vec<Release> {
         let def = parse_definition(DEF).unwrap();
         let html = include_str!("../tests/fixtures/simple_tracker.html");
-        extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap()
+        extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &test_base(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -436,11 +507,17 @@ search:
 
     #[test]
     fn reads_attributes_when_specified() {
+        // Resolved against `test_base()` ("https://t.example/browse"); see
+        // `relative_details_and_download_resolve_against_the_response_base`
+        // for the dedicated resolution test.
         assert_eq!(
             releases()[1].download_url.as_deref(),
-            Some("/download/2.torrent")
+            Some("https://t.example/download/2.torrent")
         );
-        assert_eq!(releases()[1].details_url.as_deref(), Some("/details/2"));
+        assert_eq!(
+            releases()[1].details_url.as_deref(),
+            Some("https://t.example/details/2")
+        );
     }
 
     #[test]
@@ -489,8 +566,14 @@ search:
 <tr class="result"><td class="name">B</td><td class="dl"></td></tr>
 </table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases =
-            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
+        let releases = extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &test_base(),
+        )
+        .unwrap();
         assert!((releases[0].download_volume_factor - 0.0).abs() < f32::EPSILON);
         assert!((releases[1].download_volume_factor - 1.0).abs() < f32::EPSILON);
     }
@@ -519,8 +602,14 @@ search:
 <tr class="result"><td class="name">B</td><td class="dl"></td></tr>
 </table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases =
-            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
+        let releases = extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &test_base(),
+        )
+        .unwrap();
         assert!((releases[0].download_volume_factor - 1.0).abs() < f32::EPSILON);
         assert!((releases[1].download_volume_factor - 1.0).abs() < f32::EPSILON);
     }
@@ -547,8 +636,14 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name">A</td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases =
-            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
+        let releases = extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &test_base(),
+        )
+        .unwrap();
         assert_eq!(releases[0].genre.as_deref(), Some("Unknown"));
         assert_eq!(releases[0].description.as_deref(), Some("A"));
     }
@@ -570,8 +665,14 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name">Big Buck Bunny<span class="tag"> NEW</span></td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases =
-            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
+        let releases = extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &test_base(),
+        )
+        .unwrap();
         assert_eq!(releases[0].title, "Big Buck Bunny");
     }
 
@@ -590,8 +691,14 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name">Big Buck<div><em><span class="tag"> NEW</span></em></div> Bunny</td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases =
-            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
+        let releases = extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &test_base(),
+        )
+        .unwrap();
         assert_eq!(releases[0].title, "Big Buck Bunny");
     }
 
@@ -610,8 +717,14 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name"><span class="tag">[X]</span>Big<span class="tag">[Y]</span> Buck<span class="tag">[Z]</span> Bunny</td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases =
-            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
+        let releases = extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &test_base(),
+        )
+        .unwrap();
         assert_eq!(releases[0].title, "Big Buck Bunny");
     }
 
@@ -651,8 +764,14 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name">A</td><td class="date">2024-01-01</td><td class="cat">2000</td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases =
-            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
+        let releases = extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &test_base(),
+        )
+        .unwrap();
         assert_eq!(releases[0].title, "A");
         assert!(
             releases[0].publish_date.is_none(),
@@ -693,8 +812,14 @@ search:
 <tr class="result"><td class="name">C</td><td class="cat">99</td></tr>
 </table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases =
-            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
+        let releases = extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &test_base(),
+        )
+        .unwrap();
         assert_eq!(
             releases[0].categories,
             vec![2040],
@@ -729,8 +854,14 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name">A</td><td class="date">2025-03-09</td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases =
-            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
+        let releases = extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &test_base(),
+        )
+        .unwrap();
         assert_eq!(
             releases[0].publish_date,
             Some(Utc.with_ymd_and_hms(2025, 3, 9, 0, 0, 0).unwrap())
@@ -764,8 +895,14 @@ search:
             <tr class="result"><td class="fallback">OnlyFallback</td></tr>
         </table>"#;
         let def = parse_definition(yaml).unwrap();
-        let releases =
-            extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap();
+        let releases = extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &test_base(),
+        )
+        .unwrap();
         assert_eq!(releases[0].title, "Preferred");
         assert_eq!(releases[1].title, "OnlyFallback");
     }
@@ -794,7 +931,7 @@ search:
         let def = parse_definition(yaml).unwrap();
         let mut ctx = FilterCtx::fixed_for_tests();
         ctx.keywords = vec!["ubuntu".into(), "server".into()];
-        let releases = extract(&def, html, &BTreeMap::new(), &ctx).unwrap();
+        let releases = extract(&def, html, &BTreeMap::new(), &ctx, &test_base()).unwrap();
         assert_eq!(releases.len(), 1);
         assert_eq!(releases[0].title, "Ubuntu 24.04 Server");
     }
@@ -827,6 +964,7 @@ search:
             r#"{"data":[{"name":"A"}]}"#,
             &BTreeMap::new(),
             &FilterCtx::fixed_for_tests(),
+            &test_base(),
         ) {
             Ok(releases) => format!("accepted, returning {} releases", releases.len()),
             Err(e) => e.to_string(),
@@ -834,6 +972,184 @@ search:
         assert!(
             message.contains("JSON"),
             "a JSON definition must be rejected with an error naming the cause, got: {message}"
+        );
+    }
+
+    #[test]
+    fn relative_details_and_download_resolve_against_the_response_base() {
+        // `simple_tracker.html`'s second row carries `href="/details/2"` and
+        // `href="/download/2.torrent"` — bare, root-relative paths, the
+        // shape a tracker's own HTML actually uses.
+        let base: url::Url = "https://t.example/browse".parse().unwrap();
+        let def = parse_definition(DEF).unwrap();
+        let html = include_str!("../tests/fixtures/simple_tracker.html");
+        let releases = extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &base,
+        )
+        .unwrap();
+        assert_eq!(
+            releases[1].details_url.as_deref(),
+            Some("https://t.example/details/2")
+        );
+        assert_eq!(
+            releases[1].download_url.as_deref(),
+            Some("https://t.example/download/2.torrent")
+        );
+    }
+
+    #[test]
+    fn absolute_and_magnet_values_pass_through_untouched() {
+        // A `details`/`download` value that is already absolute (a
+        // `magnet:` URI, or an `http(s)://` URL pointing somewhere other
+        // than the response's own host, e.g. a CDN) must not be rewritten.
+        let yaml = r"
+id: simple
+name: Simple
+search:
+  rows:
+    selector: tr.result
+  fields:
+    title:
+      selector: td.name
+    details:
+      selector: td.name a
+      attribute: href
+    download:
+      selector: td.dl a
+      attribute: href
+";
+        let html = r#"<table><tr class="result">
+<td class="name"><a href="https://cdn.example.org/details/1">A</a></td>
+<td class="dl"><a href="magnet:?xt=urn:btih:abc123">M</a></td>
+</tr></table>"#;
+        let def = parse_definition(yaml).unwrap();
+        let base: url::Url = "https://t.example/browse".parse().unwrap();
+        let releases = extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &base,
+        )
+        .unwrap();
+        assert_eq!(
+            releases[0].details_url.as_deref(),
+            Some("https://cdn.example.org/details/1")
+        );
+        assert_eq!(
+            releases[0].download_url.as_deref(),
+            Some("magnet:?xt=urn:btih:abc123")
+        );
+    }
+
+    #[test]
+    fn a_value_base_cannot_join_stays_verbatim_rather_than_erroring() {
+        // "http://[::1" looks absolute (it has a scheme) but is a malformed
+        // IPv6 host, so it fails both `Url::parse` (not a valid absolute
+        // URL) and `base.join` (still invalid once merged). Extraction must
+        // never fail an otherwise-good row over an unresolvable URL field —
+        // the raw text is kept as-is.
+        let yaml = r"
+id: simple
+name: Simple
+search:
+  rows:
+    selector: tr.result
+  fields:
+    title:
+      selector: td.name
+    details:
+      selector: td.name a
+      attribute: href
+";
+        let html = r#"<table><tr class="result"><td class="name"><a href="http://[::1">A</a></td></tr></table>"#;
+        let def = parse_definition(yaml).unwrap();
+        let base: url::Url = "https://t.example/browse".parse().unwrap();
+        let releases = extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &base,
+        )
+        .unwrap();
+        assert_eq!(releases[0].details_url.as_deref(), Some("http://[::1"));
+    }
+
+    #[test]
+    fn a_relative_poster_resolves_against_the_response_base_like_details_and_download() {
+        // `poster` goes through the same `resolved` closure as
+        // `details`/`download` (`build_release`'s `release.poster =
+        // resolved("poster")`) — pinned separately since none of the other
+        // resolution tests above exercise this field.
+        let yaml = r"
+id: simple
+name: Simple
+search:
+  rows:
+    selector: tr.result
+  fields:
+    title:
+      selector: td.name
+    poster:
+      selector: td.name a
+      attribute: href
+";
+        let html = r#"<table><tr class="result"><td class="name"><a href="/img/poster1.jpg">A</a></td></tr></table>"#;
+        let def = parse_definition(yaml).unwrap();
+        let base: url::Url = "https://t.example/browse".parse().unwrap();
+        let releases = extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &base,
+        )
+        .unwrap();
+        assert_eq!(
+            releases[0].poster.as_deref(),
+            Some("https://t.example/img/poster1.jpg")
+        );
+    }
+
+    #[test]
+    fn a_protocol_relative_value_joins_with_the_base_s_scheme() {
+        // `//host/path` has no scheme, so `Url::parse` rejects it as
+        // absolute and it falls through to `base.join(value)` — `Url::join`
+        // treats a leading `//` as a scheme-relative reference and borrows
+        // the base's own scheme, exactly what a browser does with a
+        // protocol-relative `href`.
+        let yaml = r"
+id: simple
+name: Simple
+search:
+  rows:
+    selector: tr.result
+  fields:
+    title:
+      selector: td.name
+    poster:
+      selector: td.name a
+      attribute: href
+";
+        let html = r#"<table><tr class="result"><td class="name"><a href="//cdn.example.org/img/poster1.jpg">A</a></td></tr></table>"#;
+        let def = parse_definition(yaml).unwrap();
+        let base: url::Url = "https://t.example/browse".parse().unwrap();
+        let releases = extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &base,
+        )
+        .unwrap();
+        assert_eq!(
+            releases[0].poster.as_deref(),
+            Some("https://cdn.example.org/img/poster1.jpg")
         );
     }
 
@@ -857,7 +1173,14 @@ search:
 ";
         let html = r#"<table><tr class="result"><td class="name">A</td></tr></table>"#;
         let def = parse_definition(yaml).unwrap();
-        let err = extract(&def, html, &BTreeMap::new(), &FilterCtx::fixed_for_tests()).unwrap_err();
+        let err = extract(
+            &def,
+            html,
+            &BTreeMap::new(),
+            &FilterCtx::fixed_for_tests(),
+            &test_base(),
+        )
+        .unwrap_err();
         let message = err.to_string();
         assert!(
             message.contains("$.torrents[0].id"),

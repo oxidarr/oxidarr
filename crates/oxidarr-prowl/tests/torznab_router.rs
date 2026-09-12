@@ -13,7 +13,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use oxidarr_db::{ConfigRepo, Db, IndexerKind, IndexerRepo, NewIndexer};
 use oxidarr_indexer::testing::{FakeClient, ok_html};
-use oxidarr_prowl::{AppState, router};
+use oxidarr_prowl::{AppState, DefinitionStore, router};
 use tower::ServiceExt;
 
 /// The Cardigann definition every Cardigann-kind test uses:
@@ -103,8 +103,10 @@ fn app(db: Db, client: FakeClient) -> (Router, FakeClient) {
     let probe = client.clone();
     let state = AppState {
         db: Arc::new(db),
-        client,
-        definitions_dir: definitions_dir(),
+        tracker_client: client,
+        app_client: FakeClient::new(),
+        defs: DefinitionStore::new(definitions_dir()),
+        external_url: "http://oxidarr.local:9696".parse().unwrap(),
     };
     (router(state), probe)
 }
@@ -267,10 +269,10 @@ async fn t_search_end_to_end_returns_the_exact_results_xml_and_threads_q() {
             r#"<channel><title>My Example Indexer</title>"#,
             r#"<item>"#,
             r#"<title>Big.Buck.Bunny.2008.1080p.BluRay.x264</title>"#,
-            r#"<guid>/details/1</guid>"#,
-            r#"<comments>/details/1</comments>"#,
-            r#"<link>/download/1.torrent</link>"#,
-            r#"<enclosure url="/download/1.torrent" type="application/x-bittorrent"/>"#,
+            r#"<guid>https://example.org/details/1</guid>"#,
+            r#"<comments>https://example.org/details/1</comments>"#,
+            r#"<link>https://example.org/download/1.torrent</link>"#,
+            r#"<enclosure url="https://example.org/download/1.torrent" type="application/x-bittorrent"/>"#,
             r#"<torznab:attr name="seeders" value="120"/>"#,
             r#"<torznab:attr name="peers" value="127"/>"#,
             r#"<torznab:attr name="downloadvolumefactor" value="1"/>"#,

@@ -44,12 +44,12 @@
 //!
 //! # Definition loading
 //!
-//! [`load_definition`] reads `<definition_id>.yml` out of
-//! [`AppState::definitions_dir`] and parses it with
-//! [`oxidarr_cardigann::model::parse_definition`] on every `t=caps` and
-//! every Cardigann-kind search — there is no cache. Caching the parsed
-//! [`Definition`] (and the [`CategoryMap`] built from it) is a later
-//! milestone's binary-level concern, not this router's.
+//! [`AppState::defs`] is a [`DefinitionStore`]: every `t=caps` and every
+//! Cardigann-kind search fetches its definition through
+//! [`DefinitionStore::get`], which parses `<definition_id>.yml` only once
+//! per id and caches the result — see that type's own docs for exact cache
+//! semantics (including why `t=caps`'s definition-listing sibling,
+//! `list_ids`, deliberately does not share that cache).
 //!
 //! # Newznab/Torznab row settings
 //!
@@ -61,19 +61,22 @@
 //!
 //! # Known limitations
 //!
-//! A release's `details`/`download` URL is rendered into the feed's
-//! `<comments>`/`<link>`/`<enclosure url>` exactly as
-//! [`oxidarr_indexer`] extracted it — see that crate's own "Known
-//! limitations" doc section. When a tracker's HTML declares that URL as a
-//! bare relative path (e.g. `href="/details/1"`, the shape this router's own
-//! `t=search` test fixture uses), it rides all the way into the response
-//! body unresolved rather than being absolutized against the tracker's base
-//! URL. Absolutizing is a prerequisite for the next milestone's grab
-//! acceptance.
+//! - `method: cookie` Cardigann definitions
+//!   (`oxidarr_indexer::login::authenticate`'s cookie flow) are not
+//!   functional through this server. That flow only ever confirms a
+//!   per-indexer `cookie` setting is present — the actual cookie has to
+//!   reach the transport via [`oxidarr_indexer::ReqwestClient::with_cookie`],
+//!   which builds a *new* client scoped to one cookie value. `tracker_client`
+//!   here is one client shared across every indexer's searches (see
+//!   [`AppState`]'s "Two client fields" section), built once at startup with
+//!   no definition or per-indexer settings in view, so no indexer's own
+//!   `cookie` setting is ever seeded into it. A cookie-login indexer
+//!   therefore searches unauthenticated exactly as if no cookie had been
+//!   configured at all — this is a documented deferral, not an oversight to
+//!   fix opportunistically.
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Router;
@@ -81,13 +84,12 @@ use axum::extract::{Path as PathParam, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use oxidarr_cardigann::CardigannError;
+use chrono::Utc;
 use oxidarr_cardigann::catmap::CategoryMap;
-use oxidarr_cardigann::model::{Definition, parse_definition};
 use oxidarr_core::Release;
 use oxidarr_core::ids::IndexerId;
 use oxidarr_db::{ConfigRepo, Db, DbError, IndexerKind, IndexerRepo, IndexerRow};
-use oxidarr_http::auth::constant_time_eq;
+use oxidarr_http::auth::{ApiKey, constant_time_eq};
 use oxidarr_indexer::{
     CardigannIndexer, HttpClient, Indexer, NewznabIndexer, SearchQuery, Settings, TorznabIndexer,
 };
@@ -95,33 +97,67 @@ use serde::Deserialize;
 use serde_json::Value;
 use url::Url;
 
+use crate::api::api_router;
+use crate::definitions::DefinitionStore;
 use crate::torznab::{render_caps, render_error, render_results};
 
 /// Shared state behind the Torznab router.
 ///
-/// Generic over `C` (the HTTP client every indexer search executes through)
-/// so tests can inject [`oxidarr_indexer::testing::FakeClient`] in place of
-/// the real [`oxidarr_indexer::ReqwestClient`]. `db` is `Arc`-wrapped since
-/// [`Db`] itself is not `Clone` and this state is cloned once per request by
+/// Generic over `C` (the HTTP client every indexer search and app-sync call
+/// executes through) so tests can inject
+/// [`oxidarr_indexer::testing::FakeClient`] in place of the real
+/// [`oxidarr_indexer::ReqwestClient`]. `db` is `Arc`-wrapped since [`Db`]
+/// itself is not `Clone` and this state is cloned once per request by
 /// axum's [`State`] extractor.
+///
+/// # Two client fields
+///
+/// `tracker_client` and `app_client` are the same concrete type `C` but
+/// deliberately separate fields, not one shared client: `tracker_client`
+/// carries every request this instance makes *outbound to a tracker*
+/// (the Torznab router's own searches, `GET /api/v1/search`, and `POST
+/// /indexer/test`'s probe), while `app_client` carries every request this
+/// instance makes *outbound to a configured Sonarr/Radarr application*
+/// (`crate::sync`'s app-sync engine, and `POST /applications/test`'s probe).
+/// A production caller wires both to the same [`oxidarr_indexer::ReqwestClient`]
+/// today — the split exists so a test can hand each traffic class its own
+/// [`oxidarr_indexer::testing::FakeClient`] with independent expectations,
+/// rather than one shared queue where a tracker-search expectation and a
+/// Sonarr-sync expectation would have to interleave in call order.
 pub struct AppState<C> {
     /// The database every request looks up its indexer row and the
     /// instance API key in.
     pub db: Arc<Db>,
-    /// The HTTP client indexer searches execute through.
-    pub client: C,
-    /// Directory Cardigann definition YAML files are read from, keyed by
-    /// `<definition_id>.yml`. See the module docs' "Definition loading"
-    /// section for why there is no cache here.
-    pub definitions_dir: PathBuf,
+    /// The HTTP client every tracker-bound request (Torznab searches,
+    /// `POST /indexer/test`) executes through. See the struct docs' "Two
+    /// client fields" section.
+    pub tracker_client: C,
+    /// The HTTP client every application-bound request (`crate::sync`,
+    /// `POST /applications/test`) executes through. See the struct docs'
+    /// "Two client fields" section.
+    pub app_client: C,
+    /// The cached Cardigann definition store every `t=caps` and
+    /// Cardigann-kind search reads its definition through. See the module
+    /// docs' "Definition loading" section.
+    pub defs: DefinitionStore,
+    /// This instance's own publicly reachable base URL — e.g.
+    /// `http://oxidarr.local:9696` — used by `crate::sync` to build the
+    /// Torznab `baseUrl` a synced Sonarr/Radarr indexer is pushed with
+    /// (`{external_url}/{indexer_id}`, joined with that application's own
+    /// `apiPath`). Sourced from instance configuration (`Config::external_url`,
+    /// see `crate::config`'s module docs); every test in this crate today
+    /// pins it to a fixed value.
+    pub external_url: Url,
 }
 
 impl<C: Clone> Clone for AppState<C> {
     fn clone(&self) -> Self {
         Self {
             db: Arc::clone(&self.db),
-            client: self.client.clone(),
-            definitions_dir: self.definitions_dir.clone(),
+            tracker_client: self.tracker_client.clone(),
+            app_client: self.app_client.clone(),
+            defs: self.defs.clone(),
+            external_url: self.external_url.clone(),
         }
     }
 }
@@ -133,7 +169,7 @@ impl<C: Clone> Clone for AppState<C> {
 impl<C> fmt::Debug for AppState<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AppState")
-            .field("definitions_dir", &self.definitions_dir)
+            .field("defs", &self.defs)
             .finish_non_exhaustive()
     }
 }
@@ -170,6 +206,31 @@ where
     Router::new()
         .route("/{indexer_id}/api", get(handle_api::<C>))
         .with_state(state)
+}
+
+/// Builds the whole application: this crate's Torznab router (`GET
+/// /{indexer_id}/api`, above) merged with the auth-wrapped `/api/v1` router
+/// ([`crate::api::api_router`]) — see that module's own docs for the
+/// deliberate asymmetry in how each side reads the instance API key.
+///
+/// Reads [`ConfigRepo::api_key`] once, at call time, to build the
+/// `/api/v1` auth layer's [`ApiKey`] state, and captures `Utc::now()` here
+/// as the `/api/v1/system/status` `startTime` every response after this
+/// call reports (see `crate::api::system::router`'s own `start_time`
+/// parameter for why it's captured once at router-build time rather than
+/// read fresh per request).
+///
+/// # Errors
+///
+/// Returns whatever [`ConfigRepo::api_key`] itself can fail with — a
+/// database unavailable at startup.
+pub async fn app<C>(state: AppState<C>) -> Result<Router, DbError>
+where
+    C: HttpClient + Clone + Send + Sync + 'static,
+{
+    let key = ConfigRepo::new(&state.db).api_key().await?;
+    let v1 = api_router(state.clone(), ApiKey::new(key), Utc::now());
+    Ok(router(state).merge(v1))
 }
 
 async fn handle_api<C>(
@@ -218,14 +279,14 @@ where
     // `tvsearch`/`movie` request is legal Torznab, so there is no reason to
     // special-case it away here.
     match params.t.as_deref() {
-        Some("caps") => caps_response(&state.definitions_dir, &row.definition_id).await,
+        Some("caps") => caps_response(&state.defs, &row.definition_id).await,
         Some("search") => {
             let q = SearchQuery {
                 q: params.q.clone(),
                 categories: parse_categories(params.cat.as_deref()),
                 ..SearchQuery::default()
             };
-            search_response(&row, &state.definitions_dir, state.client.clone(), &q).await
+            search_response(&row, &state.defs, state.tracker_client.clone(), &q).await
         }
         Some("tvsearch") => {
             let q = SearchQuery {
@@ -235,7 +296,7 @@ where
                 categories: parse_categories(params.cat.as_deref()),
                 ..SearchQuery::default()
             };
-            search_response(&row, &state.definitions_dir, state.client.clone(), &q).await
+            search_response(&row, &state.defs, state.tracker_client.clone(), &q).await
         }
         Some("movie") => {
             let q = SearchQuery {
@@ -244,7 +305,7 @@ where
                 categories: parse_categories(params.cat.as_deref()),
                 ..SearchQuery::default()
             };
-            search_response(&row, &state.definitions_dir, state.client.clone(), &q).await
+            search_response(&row, &state.defs, state.tracker_client.clone(), &q).await
         }
         Some(other) => xml_response(StatusCode::OK, render_error(202, &no_such_function(other))),
         None => xml_response(StatusCode::OK, render_error(200, "Missing parameter (t)")),
@@ -295,7 +356,13 @@ fn parse_categories(raw: Option<&str>) -> Vec<u32> {
 /// other JSON type falls back to its compact JSON text — every real
 /// Cardigann `settings:` value is declared/stored as a string, so this
 /// fallback only matters for a value some caller stored non-canonically.
-fn settings_from_json(settings: &serde_json::Map<String, Value>) -> BTreeMap<String, String> {
+///
+/// `pub(crate)` (not private) so [`crate::api::indexers`]'s `POST
+/// /indexer/test` handler can build the same string-valued map from a
+/// request body's settings, rather than duplicating this conversion.
+pub(crate) fn settings_from_json(
+    settings: &serde_json::Map<String, Value>,
+) -> BTreeMap<String, String> {
     settings
         .iter()
         .map(|(key, value)| {
@@ -308,58 +375,12 @@ fn settings_from_json(settings: &serde_json::Map<String, Value>) -> BTreeMap<Str
         .collect()
 }
 
-/// Failure loading and parsing `<definition_id>.yml`, distinguishing "the
-/// file could not be read" from "the file was read but is not a valid
-/// Cardigann definition" purely for a clearer [`Display`](fmt::Display).
-#[derive(Debug, thiserror::Error)]
-enum DefinitionError {
-    #[error("reading definition {id:?}: {source}")]
-    Io {
-        id: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("parsing definition {id:?}: {source}")]
-    Parse {
-        id: String,
-        #[source]
-        source: CardigannError,
-    },
-}
-
-/// Reads and parses `<definition_id>.yml` from `dir`. See the module docs'
-/// "Definition loading" section: no caching, by design, for now.
-///
-/// Async (backed by [`tokio::fs::read_to_string`], not [`std::fs`]) since
-/// this runs inline in an async handler on every `t=caps` and every
-/// Cardigann-kind search — a blocking read here would stall the executor
-/// thread it runs on for every other in-flight request.
-///
-/// # Errors
-///
-/// Returns [`DefinitionError::Io`] if the file cannot be read, or
-/// [`DefinitionError::Parse`] if it can be read but does not parse as a
-/// Cardigann v11 definition.
-async fn load_definition(dir: &Path, definition_id: &str) -> Result<Definition, DefinitionError> {
-    let path = dir.join(format!("{definition_id}.yml"));
-    let text = tokio::fs::read_to_string(&path)
-        .await
-        .map_err(|source| DefinitionError::Io {
-            id: definition_id.to_string(),
-            source,
-        })?;
-    parse_definition(&text).map_err(|source| DefinitionError::Parse {
-        id: definition_id.to_string(),
-        source,
-    })
-}
-
-/// Renders `t=caps`: loads `row.definition_id`'s definition and its
-/// [`CategoryMap`], then [`render_caps`]s them. A definition load failure
-/// renders as a `300` error with the failure's own [`Display`](fmt::Display)
-/// text.
-async fn caps_response(definitions_dir: &Path, definition_id: &str) -> Response {
-    match load_definition(definitions_dir, definition_id).await {
+/// Renders `t=caps`: loads `row.definition_id`'s definition (through
+/// [`DefinitionStore::get`]) and its [`CategoryMap`], then [`render_caps`]s
+/// them. A definition load failure renders as a `300` error with the
+/// failure's own [`Display`](fmt::Display) text.
+async fn caps_response(defs: &DefinitionStore, definition_id: &str) -> Response {
+    match defs.get(definition_id).await {
         Ok(def) => {
             let map = CategoryMap::from_definition(&def);
             xml_response(StatusCode::OK, render_caps(&def, &map))
@@ -375,14 +396,14 @@ async fn caps_response(definitions_dir: &Path, definition_id: &str) -> Response 
 /// search itself failing.
 async fn search_response<C>(
     row: &IndexerRow,
-    definitions_dir: &Path,
+    defs: &DefinitionStore,
     client: C,
     q: &SearchQuery,
 ) -> Response
 where
     C: HttpClient,
 {
-    match search_row(row, definitions_dir, client, q).await {
+    match search_row(row, defs, client, q).await {
         Ok(releases) => xml_response(StatusCode::OK, render_results(&releases, &row.name)),
         Err(message) => xml_response(StatusCode::OK, render_error(300, &message)),
     }
@@ -393,9 +414,15 @@ where
 /// unparseable `baseUrl` row setting, or the search call itself — is
 /// collapsed to its `Display` text as a plain `String`, since every one of
 /// them renders through the same `300` error path in [`search_response`].
-async fn search_row<C>(
+///
+/// `pub(crate)` (not private) so [`crate::api::search`]'s multi-indexer `GET
+/// /api/v1/search` endpoint can build the exact same [`Indexer`] this
+/// router's own `t=search`/`t=tvsearch`/`t=movie` dispatch does, off a row it
+/// read itself — the one indexer-construction path this crate has, not two
+/// that could silently drift apart.
+pub(crate) async fn search_row<C>(
     row: &IndexerRow,
-    definitions_dir: &Path,
+    defs: &DefinitionStore,
     client: C,
     q: &SearchQuery,
 ) -> Result<Vec<Release>, String>
@@ -404,11 +431,15 @@ where
 {
     match row.kind {
         IndexerKind::Cardigann => {
-            let def = load_definition(definitions_dir, &row.definition_id)
+            let def = defs
+                .get(&row.definition_id)
                 .await
                 .map_err(|err| err.to_string())?;
             let settings = Settings::new(settings_from_json(&row.settings));
-            CardigannIndexer::new(def, settings, client)
+            // `CardigannIndexer::new` takes an owned `Definition`; `def` is
+            // the store's cached `Arc`, so this clones out of it rather
+            // than re-reading/re-parsing the file.
+            CardigannIndexer::new((*def).clone(), settings, client)
                 .search(q)
                 .await
                 .map_err(|err| err.to_string())

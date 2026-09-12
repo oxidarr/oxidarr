@@ -306,6 +306,14 @@ fn build_request(
                         }
                     }
                 }
+                // Unreachable: `method` above is computed from `path.method`
+                // as either `Post` or `Get`, never `Put`/`Delete` — those
+                // exist solely for `oxidarr-prowl`'s app-sync engine, which
+                // never builds a Cardigann search request. Matched
+                // exhaustively rather than a wildcard so a future change to
+                // that computation gets a compile error here, not a silent
+                // fallthrough.
+                Method::Put | Method::Delete => {}
             },
             RenderedInput::Empty => {}
         }
@@ -330,6 +338,9 @@ fn build_request(
             None
         }
         Method::Post => Some(Body::Form(pairs)),
+        // Unreachable — see the identical comment above on this same
+        // `method` value's other match.
+        Method::Put | Method::Delete => None,
     };
 
     let headers = search
@@ -491,9 +502,9 @@ search:
         // tracker id mapped to *any* of its children (tv, tracker "2" ->
         // 5030) as well as one mapped to the bare block itself (tv-block-
         // only, tracker "3" -> 5000) — `CategoryMap::to_tracker`'s parent
-        // expansion (Task 2), exercised end to end through request
-        // building. "movies" (tracker "1" -> 2000, an unrelated top-level
-        // block) must NOT be reached.
+        // expansion, exercised end to end through request building.
+        // "movies" (tracker "1" -> 2000, an unrelated top-level block) must
+        // NOT be reached.
         let def = parse(CATEGORY_DEF);
         let q = query("ubuntu", vec![5000]);
 

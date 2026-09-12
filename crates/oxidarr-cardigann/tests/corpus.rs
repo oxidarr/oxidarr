@@ -22,6 +22,13 @@ pub fn corpus_dir() -> PathBuf {
     }
 }
 
+/// A stand-in response base for the synthetic-row gates below, which drive
+/// hand-written HTML through `extract` rather than a real HTTP response —
+/// no assertion in this file depends on which host it names.
+fn synthetic_base() -> url::Url {
+    "https://synthetic.example/search".parse().unwrap()
+}
+
 /// Returns all `.yml` file paths in the corpus directory, sorted.
 ///
 /// # Panics
@@ -771,6 +778,7 @@ fn json_response_definitions_are_rejected_not_silently_empty() {
             r#"{"data":[{"name":"x"}]}"#,
             &std::collections::BTreeMap::new(),
             &oxidarr_cardigann::FilterCtx::fixed_for_tests(),
+            &synthetic_base(),
         )
         .is_ok()
         {
@@ -942,6 +950,7 @@ fn representative_definitions_populate_publish_date_from_a_synthetic_row() {
             html,
             &std::collections::BTreeMap::new(),
             &oxidarr_cardigann::FilterCtx::fixed_for_tests(),
+            &synthetic_base(),
         );
         let Ok(releases) = extracted else {
             failures.push(format!("{file}: extract failed"));
