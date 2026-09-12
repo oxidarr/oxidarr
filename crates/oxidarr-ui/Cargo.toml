@@ -8,7 +8,16 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lib]
+name = "oxidarr_ui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oxidarr-ui"
+path = "src/main.rs"
+
 [dependencies]
+dioxus = { workspace = true }
 
 [lints]
 workspace = true

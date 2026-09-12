@@ -25,6 +25,7 @@ oxidarr-indexer = { workspace = true }
 axum = { workspace = true }
 quick-xml = { workspace = true }
 chrono = { workspace = true }
+include_dir = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -35,6 +36,14 @@ url = { workspace = true }
 [dev-dependencies]
 tower = { workspace = true }
 tempfile = { workspace = true }
+
+[features]
+# Embeds and serves the `oxidarr-ui` web bundle at `/` — see
+# `src/ui.rs`'s module docs. Off by default: enabling it requires
+# `crates/oxidarr-ui/dist` to exist (a real `dx build`, or this crate's own
+# placeholder — see that module's docs), and no test outside this feature
+# needs a wasm toolchain or that directory at all.
+ui = ["dep:include_dir"]
 
 [lints]
 workspace = true

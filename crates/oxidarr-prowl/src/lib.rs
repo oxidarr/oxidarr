@@ -29,6 +29,10 @@
 //! [`config`] is the `oxidarr-prowl` binary's own instance configuration —
 //! a TOML file plus `OXIDARR_*` environment overrides — consumed by
 //! `src/main.rs` to build the [`AppState`] this crate's [`app`] serves.
+//!
+//! [`ui`] (behind the `ui` cargo feature, off by default) embeds and serves
+//! the `oxidarr-ui` web bundle; see that module's own docs for how and why
+//! it can never shadow the [`api`]/[`torznab`] routes above.
 
 pub mod api;
 pub mod config;
@@ -36,6 +40,8 @@ pub mod definitions;
 pub mod server;
 pub mod sync;
 pub mod torznab;
+#[cfg(feature = "ui")]
+pub mod ui;
 
 pub use api::api_router;
 pub use config::{Config, ConfigError, load_config};

@@ -1,0 +1,7 @@
+# dx build output. The root .gitignore's `/dist` only anchors to the repo
+# root, not this crate subdir, so it never actually covered this directory
+# — this file closes that gap. See `src/main.rs`'s docs and
+# `crates/oxidarr-prowl/src/ui.rs` for why this directory needs to exist
+# (even as a placeholder) for `cargo build --features ui` to compile at
+# all in this workspace.
+/dist

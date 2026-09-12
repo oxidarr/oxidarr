@@ -1,0 +1,9 @@
+[application]
+name = "oxidarr-ui"
+# `dx build`'s output directory, relative to this file. `oxidarr-prowl`'s
+# `ui` feature embeds `../oxidarr-ui/dist` at compile time (see
+# `crates/oxidarr-prowl/src/ui.rs`) — this must stay in sync with that path.
+out_dir = "dist"
+
+[web.app]
+title = "Oxidarr"
