@@ -1,6 +1,6 @@
 /* Minimal, readable layout — no theming beyond what makes the shell
-   usable. See .local/plan-04-ui/design.md's non-goals: "theming beyond a
-   minimal stylesheet" is explicitly out of scope for this plan. */
+   usable. Theming beyond a minimal stylesheet is explicitly out of
+   scope. */
 
 body {
   margin: 0;

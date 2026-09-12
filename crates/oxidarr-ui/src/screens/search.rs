@@ -1,5 +1,5 @@
 //! The search screen: a query/indexer/category form over
-//! `GET /api/v1/search`, and a results table — the last of Plan 4's four
+//! `GET /api/v1/search`, and a results table — the last of this crate's four
 //! screens, and the simplest: no add/edit flow, no `ScreenState` (compare
 //! `crate::screens::applications`/`crate::screens::indexers`, both of which
 //! need one). [`SearchFormView`] and [`SearchResultsView`] are this
@@ -10,16 +10,16 @@
 //!
 //! # Indexer "multi-select" is a checkbox list, not a `<select multiple>`
 //!
-//! This task's own brief calls for an "indexer multi-select". A native
-//! `<select multiple>` needs reading a change event's own
-//! `selectedOptions` collection back out — `dioxus`'s own form event does
-//! not expose that directly, unlike a checkbox's plain `checked` bool. A
-//! checkbox per indexer (this screen's own [`SearchFormView`]) gives the
-//! same "pick any subset" semantics with the same per-item `onchange`
-//! convention every other screen's own toggles already use (see
+//! The requirement is an "indexer multi-select". A native `<select
+//! multiple>` needs reading a change event's own `selectedOptions`
+//! collection back out — `dioxus`'s own form event does not expose that
+//! directly, unlike a checkbox's plain `checked` bool. A checkbox per
+//! indexer (this screen's own [`SearchFormView`]) gives the same "pick any
+//! subset" semantics with the same per-item `onchange` convention every
+//! other screen's own toggles already use (see
 //! `crate::screens::indexers::IndexerListView`'s own enable checkbox), at
-//! no cost to what this screen's own brief actually asks for: an "any
-//! subset of indexers" selector, not a specific HTML element.
+//! no cost to the actual requirement: an "any subset of indexers" selector,
+//! not a specific HTML element.
 //!
 //! # No selection means "search every enabled indexer"
 //!

@@ -4,8 +4,8 @@
 //! that fetches from the shared `ApiClient` and feeds [`StatusView`] once
 //! the data lands.
 //!
-//! Per this task's own brief: the server has no "definitions count"
-//! endpoint, so "indexers configured" is derived from `indexers().len()`
+//! The server has no "definitions count" endpoint, so "indexers configured"
+//! is derived from `indexers().len()`
 //! rather than a dedicated count; and the per-indexer Torznab URL
 //! (`{origin}/{id}/api`, matching `oxidarr_prowl`'s own route shape — see
 //! that crate's torznab router) is built client-side from `origin` (the
@@ -127,8 +127,7 @@ fn current_origin() -> String {
 /// than awaited, since this button has nothing useful to show for a
 /// success/failure it can't easily surface anyway (browsers already show
 /// their own permission prompt/toast for clipboard access). A no-op
-/// everywhere else, per this task's own brief ("clipboard via web-sys,
-/// no-op native") — there is no clipboard to write to outside a browser.
+/// everywhere else — there is no clipboard to write to outside a browser.
 #[cfg(target_arch = "wasm32")]
 fn copy_to_clipboard(text: &str) {
     if let Some(window) = web_sys::window() {

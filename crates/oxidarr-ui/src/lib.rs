@@ -6,10 +6,11 @@
 //!
 //! A library target (not just the `oxidarr-ui` binary `dx build` produces)
 //! so [`App`] and the API client and view logic can be unit-tested
-//! natively — `cargo test -p oxidarr-ui` needs no wasm target, per this
-//! workspace's design (see `.local/plan-04-ui/design.md`'s "Testing"
-//! decision). `src/main.rs` is the thin `dioxus::launch` entry point `dx`
-//! builds for the web target.
+//! natively — `cargo test -p oxidarr-ui` needs no wasm target: view logic
+//! renders through native unit tests and SSR snapshot pins
+//! (`tests/snapshots.rs`), and the one genuinely `wasm32`-only piece stays
+//! isolated behind [`fetch`]. `src/main.rs` is the thin `dioxus::launch`
+//! entry point `dx` builds for the web target.
 //!
 //! [`api`] and [`dto`] are wasm-independent by design: neither imports
 //! `dioxus`, so both compile and their tests run on any native target,

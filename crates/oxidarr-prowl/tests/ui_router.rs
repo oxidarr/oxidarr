@@ -127,15 +127,18 @@ async fn an_unimplemented_api_v1_path_is_not_found_not_the_spa_shell() {
 }
 
 /// Proves the *production* embed (`crate::ui::router`, backed by the real
-/// `DIST`) actually serves the real app shell — not the placeholder stub
-/// committed at `crates/oxidarr-ui/dist/index.html` for a plain
-/// `cargo build --features ui` to compile without a prior `dx build`.
-/// Ignored by default: locally, without a real `dx build`, the stub is
-/// deliberately marker-less (see that file's own comment) and this fails
-/// on purpose. CI's `ui` job runs `dx build --release` first and then
-/// runs with `--include-ignored`, so it's the one place this actually
-/// exercises the real bundle.
-#[ignore = "run in the ui CI job after `dx build` — the local dist/ is a marker-less stub"]
+/// `DIST`) actually serves the real app shell. There is no stub anywhere
+/// in this repository for `crates/oxidarr-ui/dist` — this whole test file
+/// only compiles at all once that directory already exists for real (see
+/// `crate::ui`'s own module docs and this crate's `build.rs`), so this
+/// isn't guarding against a *missing* bundle. It's ignored by default
+/// anyway because whatever `dist` happens to be sitting around locally
+/// could be stale (built from older source, or built for a different
+/// purpose entirely) rather than the one this task's own CI flow just
+/// produced. CI's `ui` job runs `./scripts/build-ui.sh` then this file
+/// with `--include-ignored` right after, so it's the one place this
+/// actually exercises a bundle guaranteed fresh.
+#[ignore = "run in the ui CI job right after ./scripts/build-ui.sh — a local dist/ may be stale"]
 #[tokio::test]
 async fn the_real_embedded_bundle_serves_the_app_shell() {
     let router = oxidarr_prowl::ui::router();

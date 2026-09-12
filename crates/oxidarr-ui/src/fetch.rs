@@ -1,10 +1,10 @@
 //! The real [`crate::api::Http`] implementation for the browser: a thin
 //! wrapper over `gloo-net`'s `fetch`-backed `Request`/`Response` (verified
 //! against `gloo-net` `0.7.0`'s own source,
-//! `~/.cargo/registry/src/.../gloo-net-0.7.0/src/http/request.rs` — this
-//! workspace has no wasm toolchain installed by default, so that source
-//! read stood in for a real compile check; see this task's own report for
-//! how far that was verified). `wasm32`-only: [`ApiClient`] is generic over
+//! `~/.cargo/registry/src/.../gloo-net-0.7.0/src/http/request.rs` — a
+//! source read stood in for a real compile check wherever this crate is
+//! built without the wasm target installed; a real `dx build` is the
+//! actual compile check). `wasm32`-only: [`ApiClient`] is generic over
 //! [`Http`] precisely so nothing else in this crate needs this module at
 //! all — `crate::app`'s `NativeHttp` fills the same role on every other
 //! target, and this crate's own tests use a scripted fake (`crate::api`'s

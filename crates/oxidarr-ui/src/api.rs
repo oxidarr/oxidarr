@@ -1,20 +1,20 @@
 //! The UI's API client core: [`Http`] is the transport abstraction real
-//! browser code (a later shell task — see `crate::fetch`'s own doc comment)
-//! and this crate's own tests both implement; [`ApiClient`] is the typed
-//! `/api/v1` surface built on top of it. See `crate::dto` for the
+//! browser code (`crate::fetch::WasmHttp` — see that module's own doc
+//! comment) and this crate's own tests both implement; [`ApiClient`] is the
+//! typed `/api/v1` surface built on top of it. See `crate::dto` for the
 //! wire-shape types every endpoint here returns or accepts.
 //!
 //! This module has no `dioxus` import and no `wasm32`-only code (that lives
 //! behind `crate::fetch`'s own `#[cfg(target_arch = "wasm32")]` gate) — it
-//! compiles and its tests run on any native target, per this crate's own
-//! testing design (`.local/plan-04-ui/design.md`'s "Testing" decision).
+//! compiles and its tests run on any native target, needing no wasm
+//! toolchain at all.
 //!
 //! # Error mapping
 //!
 //! Every endpoint maps its raw `(status, body)` response the same way:
 //!
 //! - `401` → [`UiError::Unauthorized`], regardless of body content — the one
-//!   status a later key-prompt-flow task reacts to specially, so no
+//!   status `crate::app`'s key-prompt flow reacts to specially, so no
 //!   `Problem`/`Decode` distinction is even attempted for it.
 //! - Any other status outside `200..300`: the body is parsed as the
 //!   server's own `{"message": "..."}` Problem shape
@@ -131,8 +131,9 @@ impl<H: Http> ApiClient<H> {
         }
     }
 
-    /// Replaces the stored API key — called once a later key-prompt-flow
-    /// task collects one from the user.
+    /// Replaces the stored API key — called once
+    /// `crate::components::key_prompt::KeyPrompt` collects one from the
+    /// user.
     pub fn set_key(&mut self, key: Option<String>) {
         self.key = key;
     }

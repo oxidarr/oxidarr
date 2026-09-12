@@ -40,15 +40,18 @@
 //! [`DIST`] embeds `$CARGO_MANIFEST_DIR/../oxidarr-ui/dist` — the output
 //! directory `crates/oxidarr-ui/Dioxus.toml` configures for `dx build`.
 //! That directory does not exist until `crates/oxidarr-ui` has actually
-//! been built with `dx build` (dioxus-cli); CI's `ui` job runs that before
-//! building/testing this crate with `--features ui`. Absent a prior `dx
-//! build` (this workspace's plain day-to-day `cargo build --features ui`,
-//! and the sandbox this task was authored in), `crates/oxidarr-ui/dist/index.html`
-//! is a committed-empty-of-real-content, gitignored placeholder (see
-//! `crates/oxidarr-ui/.gitignore`) that exists purely so `include_dir!` has
-//! a directory to embed at compile time; a real `dx build` overwrites it,
-//! and it is never what this module's own tests assert against (see
-//! below).
+//! been built (`./scripts/build-ui.sh`, or `dx build` plus that script's
+//! own copy step — see its comment for why the copy is needed at all); CI's
+//! `ui` job runs it before building/testing this crate with `--features
+//! ui`. There is no placeholder or stub shipped anywhere in this
+//! repository for that directory (a build script fabricating one would
+//! defeat the "is this the real bundle" check below and in CI) — enabling
+//! `ui` without having built it first is a hard build failure: `build.rs`
+//! catches it early with a one-line panic pointing at
+//! `./scripts/build-ui.sh`; absent that, `include_dir!` itself fails the
+//! same way but with a far less clear message (`"... is not a
+//! directory"`). See this repository's own README.md ("Web UI" section)
+//! for the full story.
 //!
 //! `include_dir!` gives cargo/rustc no signal that this directory's
 //! *contents* ever changed — it only calls `tracked_path::path` (the API

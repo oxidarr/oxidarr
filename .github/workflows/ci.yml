@@ -39,16 +39,21 @@ jobs:
       - name: Install dioxus-cli
         run: cargo install dioxus-cli --version 0.7.10 --locked
       - name: Build the web ui bundle
-        working-directory: crates/oxidarr-ui
-        run: dx build --release
-      - name: Verify the built bundle is real, not the committed stub
-        # crates/oxidarr-ui/dist/index.html is a gitignored placeholder
-        # (see that file's own comment) that exists so a plain `cargo
-        # build --features ui` compiles without a prior `dx build`; it
-        # deliberately carries no `id="oxidarr-app"` marker. If `dx build`
-        # silently no-ops or fails to overwrite it, every test below would
-        # still pass against the fixture bundle and never notice — so
-        # check the actual file on disk directly.
+        # Runs `dx build --release` in crates/oxidarr-ui and copies its real
+        # output into crates/oxidarr-ui/dist — see that script's own
+        # comment for why the copy step is needed at all (`dx build` does
+        # not write there itself).
+        run: ./scripts/build-ui.sh
+      - name: Verify the built bundle is real
+        # There is no committed stub anywhere in this repository — the `ui`
+        # feature simply fails to build at all without a prior
+        # ./scripts/build-ui.sh (see src/ui.rs's own module docs and
+        # build.rs). This step instead guards against the previous step
+        # having silently produced a *stale* or wrong bundle (e.g. a cache
+        # restore, or a dx regression that no-ops without erroring): if
+        # dist/index.html doesn't carry the real app's own marker, or does
+        # carry the literal string CI's own grep looks for below, something
+        # upstream is wrong even though the build itself "succeeded".
         working-directory: crates/oxidarr-ui
         run: |
           grep -q 'id="oxidarr-app"' dist/index.html

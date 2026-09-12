@@ -1,0 +1,36 @@
+<!--
+  Custom shell dx build/serve reads from this crate's root (falling back to
+  its own built-in template when this file is absent — see dioxus-cli
+  0.7.10's build/web.rs, prepare_html). The one thing this template changes
+  from that built-in default: the mount div carries the id "oxidarr-app"
+  instead of dioxus_web's own default id "main" — src/main.rs configures
+  dioxus_web::Config::rootname("oxidarr-app") to match, and src/app.rs's
+  App component renders straight into it rather than creating its own
+  wrapping div, so the shell's mount div is the one and only #oxidarr-app
+  in the served page (styled by assets/app.css's own #oxidarr-app rule).
+
+  That id is also this bundle's own "is this the real thing" marker:
+  crates/oxidarr-prowl/src/ui.rs's tests and CI's ui job both check the
+  served index.html for it to prove a real dx build produced the embedded
+  bundle, not the placeholder stub committed at
+  crates/oxidarr-ui/dist/index.html.
+
+  Note for anyone editing this file: dx's own prepare_html does plain
+  string replacement over this file's raw text (title placeholder, the
+  injected loading script tag before the page's closing body tag) with no
+  awareness of HTML comment boundaries, so avoid spelling those two exact
+  tokens out literally anywhere above this line, comments included, or dx
+  will rewrite them here too.
+-->
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <title>{app_title}</title>
+        <meta content="text/html;charset=utf-8" http-equiv="Content-Type">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta charset="UTF-8">
+    </head>
+    <body>
+        <div id="oxidarr-app">Loading Oxidarr…</div>
+    </body>
+</html>

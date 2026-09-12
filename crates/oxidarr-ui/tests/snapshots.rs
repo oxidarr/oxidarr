@@ -1,6 +1,7 @@
 //! SSR render-to-string pins for this crate's views — the "views get SSR
-//! snapshot pins" half of `.local/plan-04-ui/design.md`'s testing design.
-//! No wasm toolchain needed: `dioxus::ssr::render` walks a [`VirtualDom`]
+//! snapshot pins" half of this crate's testing design (native unit tests
+//! plus SSR snapshot pins; see `crates/oxidarr-ui/src/lib.rs`'s own doc
+//! comment). No wasm toolchain needed: `dioxus::ssr::render` walks a [`VirtualDom`]
 //! built and progressed entirely in-process (verified by this file's own
 //! `cargo test -p oxidarr-ui` run, no `--target wasm32-unknown-unknown`),
 //! and this crate's `Cargo.toml` pulls `dioxus`'s `ssr` feature in only as
@@ -14,15 +15,14 @@
 //! Small, single-purpose components ([`KeyPrompt`], [`Banner`]) are pinned
 //! as inline `assert_eq!` literals in this file — the whole point of a
 //! small fixed string is that a reviewer can read the expected HTML
-//! directly in the diff that changes it. [`StatusView`], the one screen
-//! this task ships, renders a multi-row table-like list whose HTML is long
-//! enough that an inline literal would bury the interesting part (the
-//! per-indexer rows) in indentation noise; that one is pinned against a
-//! committed file instead, `tests/snapshots/status.html` — read side by
-//! side with a diff tool, a changed row is easy to see, unlike a changed
-//! substring inside one giant `assert_eq!` argument. Later screen tasks
-//! (indexers/applications/search) follow the same rule: one screen, one
-//! `tests/snapshots/<screen>.html`.
+//! directly in the diff that changes it. [`StatusView`] renders a
+//! multi-row table-like list whose HTML is long enough that an inline
+//! literal would bury the interesting part (the per-indexer rows) in
+//! indentation noise; that one is pinned against a committed file instead,
+//! `tests/snapshots/status.html` — read side by side with a diff tool, a
+//! changed row is easy to see, unlike a changed substring inside one giant
+//! `assert_eq!` argument. The other screens (indexers/applications/search)
+//! follow the same rule: one screen, one `tests/snapshots/<screen>.html`.
 //!
 //! # Constructing a [`VirtualDom`] for a props-driven component
 //!

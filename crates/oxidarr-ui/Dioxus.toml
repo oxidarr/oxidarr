@@ -1,8 +1,16 @@
 [application]
 name = "oxidarr-ui"
-# `dx build`'s output directory, relative to this file. `oxidarr-prowl`'s
-# `ui` feature embeds `../oxidarr-ui/dist` at compile time (see
-# `crates/oxidarr-prowl/src/ui.rs`) — this must stay in sync with that path.
+# NOTE: `dx build` (dioxus-cli 0.7.10) does not actually read this for a web
+# build — it always writes to
+# `<workspace>/target/dx/oxidarr-ui/<release|debug>/web/public`, ignoring
+# `out_dir` entirely (that field is only consulted by the separate `dx
+# bundle` subcommand, and even then nests the result one level deeper, under
+# `<out_dir>/public`). `scripts/build-ui.sh` copies `dx build`'s real output
+# into `dist/` itself — the directory `oxidarr-prowl`'s `ui` feature embeds
+# at compile time (see `crates/oxidarr-prowl/src/ui.rs`) — rather than
+# relying on this setting. Left here as documentation of the intended
+# destination, and in case a future dioxus-cli version honors it for `dx
+# build` too.
 out_dir = "dist"
 
 [web.app]

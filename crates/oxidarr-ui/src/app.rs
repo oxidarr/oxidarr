@@ -44,9 +44,9 @@ use crate::screens::status::Status;
 
 /// This app's four screens, nested under [`Layout`] so every route shares
 /// the same nav. The nav's own *display* order —
-/// Indexers/Applications/Search/Status, per this task's own brief — is
-/// independent of this enum's declaration order: `/` (what a bare origin
-/// request resolves to) is [`Status`], the most useful landing page.
+/// Indexers/Applications/Search/Status — is independent of this enum's
+/// declaration order: `/` (what a bare origin request resolves to) is
+/// [`Status`], the most useful landing page.
 #[derive(Routable, Clone, PartialEq, Debug)]
 #[rustfmt::skip]
 pub enum Route {
@@ -155,10 +155,9 @@ fn classify_error(err: UiError) -> ErrorEffect {
 
 /// Routes any screen's [`UiError`] into `session`: a `401` clears the
 /// stored key ([`key_store::clear`]) and reopens the key prompt; every
-/// other error shows its message in the dismissible banner. Called from
-/// `crate::screens::status::Status` today; every later screen task
-/// (indexers/applications/search) routes its own `UiError`s through the
-/// same helper.
+/// other error shows its message in the dismissible banner. Every routed
+/// screen (status, indexers, applications, search) routes its own
+/// `UiError`s through this same helper.
 pub fn handle_error(err: UiError, session: &mut Session) {
     match classify_error(err) {
         ErrorEffect::ReauthRequired => {
@@ -170,9 +169,11 @@ pub fn handle_error(err: UiError, session: &mut Session) {
 }
 
 /// The app's root component — see this module's own doc comment for how
-/// its pieces fit together. Renders the `#oxidarr-app` marker div `dx
-/// build`'s bundle mounts into (kept from this crate's earlier scaffold —
-/// `crates/oxidarr-prowl/src/ui.rs`'s own tests select on it).
+/// its pieces fit together. Renders directly into the `#oxidarr-app` div
+/// `crates/oxidarr-ui/index.html`'s own shell already provides as
+/// `dioxus_web`'s mount point (see `src/main.rs`'s `rootname` config) —
+/// there is no need to recreate that marker div here, and doing so would
+/// only nest a second element under the same id.
 #[component]
 pub fn App() -> Element {
     let mut api = use_context_provider(|| {
@@ -189,21 +190,19 @@ pub fn App() -> Element {
 
     rsx! {
         document::Stylesheet { href: asset!("/assets/app.css") }
-        div { id: "oxidarr-app",
-            if let Some(message) = session.error.read().clone() {
-                Banner { message, ondismiss: move |()| session.error.set(None) }
+        if let Some(message) = session.error.read().clone() {
+            Banner { message, ondismiss: move |()| session.error.set(None) }
+        }
+        if *session.needs_key.read() {
+            KeyPrompt {
+                onsubmit: move |key: String| {
+                    key_store::set(&key);
+                    api.write().set_key(Some(key));
+                    session.needs_key.set(false);
+                },
             }
-            if *session.needs_key.read() {
-                KeyPrompt {
-                    onsubmit: move |key: String| {
-                        key_store::set(&key);
-                        api.write().set_key(Some(key));
-                        session.needs_key.set(false);
-                    },
-                }
-            } else {
-                Router::<Route> {}
-            }
+        } else {
+            Router::<Route> {}
         }
     }
 }

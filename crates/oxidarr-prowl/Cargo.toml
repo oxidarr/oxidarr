@@ -39,10 +39,13 @@ tempfile = { workspace = true }
 
 [features]
 # Embeds and serves the `oxidarr-ui` web bundle at `/` — see
-# `src/ui.rs`'s module docs. Off by default: enabling it requires
-# `crates/oxidarr-ui/dist` to exist (a real `dx build`, or this crate's own
-# placeholder — see that module's docs), and no test outside this feature
-# needs a wasm toolchain or that directory at all.
+# `src/ui.rs`'s module docs. Off by default: no test outside this feature
+# needs a wasm toolchain or crates/oxidarr-ui/dist at all. Enabling it is a
+# hard prerequisite, not an option — `crates/oxidarr-ui/dist` must already
+# exist (run `./scripts/build-ui.sh` first; see README.md's "Web UI"
+# section) or the build fails, caught early with an actionable message by
+# `build.rs`, or otherwise later by `include_dir!`'s own much less clear
+# panic.
 ui = ["dep:include_dir"]
 
 [lints]

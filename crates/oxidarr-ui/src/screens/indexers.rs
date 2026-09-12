@@ -12,8 +12,8 @@
 //!
 //! # State machine
 //!
-//! [`ScreenState`] is kept to three variants, per this task's own brief:
-//! `List`, `Add { schema }`, `Edit { resource }`. The add flow's own
+//! [`ScreenState`] is kept to three variants: `List`, `Add { schema }`,
+//! `Edit { resource }`. The add flow's own
 //! `schema` starts `None` (the definition picker shows) and becomes
 //! `Some(entry)` in place, without ever leaving the `Add` variant, once a
 //! definition is picked — no separate "picking" state is needed.
@@ -187,7 +187,7 @@ pub fn toggle_enable(resource: &IndexerResource) -> IndexerResource {
 }
 
 /// Case-insensitive substring filter over `entries`'s own `name` — the add
-/// flow's definition picker searches by name, per this task's own brief.
+/// flow's definition picker searches by name.
 #[must_use]
 pub fn filter_schema_entries<'a>(
     entries: &'a [IndexerResource],
