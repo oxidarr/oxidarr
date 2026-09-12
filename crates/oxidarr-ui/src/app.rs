@@ -37,6 +37,7 @@ use crate::components::banner::Banner;
 use crate::components::key_prompt::KeyPrompt;
 use crate::components::layout::Layout;
 use crate::key_store;
+use crate::screens::indexers::Indexers;
 use crate::screens::status::Status;
 
 /// This app's four screens, nested under [`Layout`] so every route shares
@@ -58,16 +59,8 @@ pub enum Route {
         Search {},
 }
 
-/// Stands in for the indexers screen until that task lands (Plan 4's
-/// task 4) — `crate::screens` only ships `status` today.
-#[component]
-fn Indexers() -> Element {
-    rsx! {
-        p { "Indexer management is not built yet." }
-    }
-}
-
-/// See [`Indexers`]'s own doc comment (task 5).
+/// Stands in for the applications screen until that task lands (Plan 4's
+/// task 5) — `crate::screens` only ships `indexers`/`status` today.
 #[component]
 fn Applications() -> Element {
     rsx! {
@@ -75,7 +68,7 @@ fn Applications() -> Element {
     }
 }
 
-/// See [`Indexers`]'s own doc comment (task 6).
+/// See [`Applications`]'s own doc comment (task 6).
 #[component]
 fn Search() -> Element {
     rsx! {
@@ -87,7 +80,7 @@ fn Search() -> Element {
 /// it wires together) type-checks and runs on non-`wasm32` targets — see
 /// this module's own doc comment.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct NativeHttp;
 
 #[cfg(not(target_arch = "wasm32"))]

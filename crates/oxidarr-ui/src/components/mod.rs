@@ -5,5 +5,6 @@
 //! files).
 
 pub mod banner;
+pub mod fields;
 pub mod key_prompt;
 pub mod layout;

@@ -104,8 +104,14 @@ struct ProblemBody {
     message: String,
 }
 
-/// A typed `/api/v1` client, generic over its [`Http`] transport.
-#[derive(Debug)]
+/// A typed `/api/v1` client, generic over its [`Http`] transport. Derives
+/// [`Clone`] (whenever `H` itself does — both `NativeHttp` and `WasmHttp`
+/// are stateless unit structs, so this is always available on either
+/// target) so a caller holding this behind a `Signal` — every screen's own
+/// `SharedApi` — can clone one out and drop the `Signal`'s read guard
+/// before `.await`ing any of its own methods, rather than holding that
+/// guard across an `.await` point.
+#[derive(Debug, Clone)]
 pub struct ApiClient<H: Http> {
     base: String,
     key: Option<String>,

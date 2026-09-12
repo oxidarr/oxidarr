@@ -43,13 +43,18 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
 use dioxus::prelude::*;
 use oxidarr_ui::components::banner::Banner;
 use oxidarr_ui::components::key_prompt::KeyPrompt;
-use oxidarr_ui::dto::{IndexerCapabilities, IndexerResource, SystemStatus};
+use oxidarr_ui::dto::{Field, IndexerCapabilities, IndexerResource, SelectOption, SystemStatus};
+use oxidarr_ui::screens::indexers::{
+    IndexerFormView, IndexerListView, TestOutcome, TestOutcomeView,
+};
 use oxidarr_ui::screens::status::{StatusView, StatusViewProps};
 
 fn key_prompt_html() -> String {
@@ -129,6 +134,111 @@ fn status_view_html() -> String {
     dioxus::ssr::render(&vdom)
 }
 
+/// [`IndexerListView`] carries `EventHandler` props, same restriction as
+/// [`key_prompt_html`]/[`banner_html`] above — see this file's own module
+/// docs for why that means a non-capturing `root` `fn` fed to
+/// `VirtualDom::new`, with the actual fixture data threaded through via a
+/// `thread_local`, rather than building `IndexerListViewProps` directly the
+/// way `status_view_html` builds `StatusViewProps`.
+fn indexer_list_view_html(
+    indexers: Vec<IndexerResource>,
+    confirm_delete_id: Option<i32>,
+    test_results: HashMap<i32, TestOutcome>,
+) -> String {
+    thread_local! {
+        static INDEXERS: RefCell<Vec<IndexerResource>> = const { RefCell::new(Vec::new()) };
+        static CONFIRM_DELETE_ID: RefCell<Option<i32>> = const { RefCell::new(None) };
+        static TEST_RESULTS: RefCell<HashMap<i32, TestOutcome>> = RefCell::new(HashMap::new());
+    }
+
+    fn root() -> Element {
+        let indexers = INDEXERS.with(|cell| cell.borrow().clone());
+        let confirm_delete_id = CONFIRM_DELETE_ID.with(|cell| *cell.borrow());
+        let test_results = TEST_RESULTS.with(|cell| cell.borrow().clone());
+        rsx! {
+            IndexerListView {
+                indexers,
+                confirm_delete_id,
+                test_results,
+                on_add: move |()| {},
+                on_edit: move |_id: i32| {},
+                on_toggle_enable: move |_id: i32| {},
+                on_delete_request: move |_id: i32| {},
+                on_delete_confirm: move |_id: i32| {},
+                on_delete_cancel: move |()| {},
+                on_test: move |_id: i32| {},
+            }
+        }
+    }
+
+    INDEXERS.with(|cell| *cell.borrow_mut() = indexers);
+    CONFIRM_DELETE_ID.with(|cell| *cell.borrow_mut() = confirm_delete_id);
+    TEST_RESULTS.with(|cell| *cell.borrow_mut() = test_results);
+    let mut vdom = VirtualDom::new(root);
+    vdom.rebuild_in_place();
+    dioxus::ssr::render(&vdom)
+}
+
+/// See [`indexer_list_view_html`]'s own doc comment — same restriction,
+/// same `thread_local` workaround, for [`IndexerFormView`].
+fn indexer_form_view_html(fields: Vec<Field>, values: HashMap<String, String>) -> String {
+    thread_local! {
+        static FIELDS: RefCell<Vec<Field>> = const { RefCell::new(Vec::new()) };
+        static VALUES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    }
+
+    fn root() -> Element {
+        let fields = FIELDS.with(|cell| cell.borrow().clone());
+        let values = VALUES.with(|cell| cell.borrow().clone());
+        rsx! {
+            IndexerFormView {
+                mode_label: "Add".to_string(),
+                definition_name: "example".to_string(),
+                name: "My Indexer".to_string(),
+                priority: 25,
+                enable: true,
+                fields,
+                values,
+                test_result: None,
+                on_name_change: move |_value: String| {},
+                on_priority_change: move |_value: String| {},
+                on_enable_change: move |_value: bool| {},
+                on_field_change: move |_change: (String, String)| {},
+                on_test: move |()| {},
+                on_save: move |()| {},
+                on_cancel: move |()| {},
+            }
+        }
+    }
+
+    FIELDS.with(|cell| *cell.borrow_mut() = fields);
+    VALUES.with(|cell| *cell.borrow_mut() = values);
+    let mut vdom = VirtualDom::new(root);
+    vdom.rebuild_in_place();
+    dioxus::ssr::render(&vdom)
+}
+
+/// See [`indexer_list_view_html`]'s own doc comment — same restriction, for
+/// [`TestOutcomeView`] (`Option<TestOutcome>` alone needs no `thread_local`
+/// juggling beyond what `banner_html` already does for a `String`).
+fn test_outcome_view_html(outcome: Option<TestOutcome>) -> String {
+    thread_local! {
+        static OUTCOME: RefCell<Option<TestOutcome>> = const { RefCell::new(None) };
+    }
+
+    fn root() -> Element {
+        let outcome = OUTCOME.with(|cell| cell.borrow().clone());
+        rsx! {
+            TestOutcomeView { outcome }
+        }
+    }
+
+    OUTCOME.with(|cell| *cell.borrow_mut() = outcome);
+    let mut vdom = VirtualDom::new(root);
+    vdom.rebuild_in_place();
+    dioxus::ssr::render(&vdom)
+}
+
 fn snapshot_path(name: &str) -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/snapshots")).join(name)
 }
@@ -169,4 +279,102 @@ fn status_screen_with_a_fixture_status_and_two_indexers_matches_its_snapshot() {
     let expected = fs::read_to_string(snapshot_path("status.html"))
         .expect("reading tests/snapshots/status.html");
     assert_eq!(html, expected.trim_end(), "rendered HTML was:\n{html}");
+}
+
+#[test]
+fn indexers_list_with_a_disabled_indexer_and_a_sync_error_matches_its_snapshot() {
+    let indexers = vec![
+        fixture_indexer(1, "Example One"),
+        IndexerResource {
+            enable: false,
+            sync_error: Some("sync failed: connection refused".to_string()),
+            ..fixture_indexer(2, "Example Two")
+        },
+    ];
+    let html = indexer_list_view_html(indexers, None, HashMap::new());
+    let expected = fs::read_to_string(snapshot_path("indexers_list.html"))
+        .expect("reading tests/snapshots/indexers_list.html");
+    assert_eq!(html, expected.trim_end(), "rendered HTML was:\n{html}");
+}
+
+#[test]
+fn indexers_list_with_a_pending_delete_confirmation_matches_its_snapshot() {
+    let indexers = vec![fixture_indexer(1, "Example One")];
+    let html = indexer_list_view_html(indexers, Some(1), HashMap::new());
+    let expected = fs::read_to_string(snapshot_path("indexers_list_confirm_delete.html"))
+        .expect("reading tests/snapshots/indexers_list_confirm_delete.html");
+    assert_eq!(html, expected.trim_end(), "rendered HTML was:\n{html}");
+}
+
+#[test]
+fn add_form_for_a_fixture_schema_entry_renders_its_select_options() {
+    let fields = vec![
+        Field {
+            name: "cookie".to_string(),
+            label: "Cookie".to_string(),
+            kind: "textbox".to_string(),
+            value: Some(serde_json::Value::String(String::new())),
+            select_options: None,
+        },
+        Field {
+            name: "freeleech".to_string(),
+            label: "Freeleech only".to_string(),
+            kind: "checkbox".to_string(),
+            value: Some(serde_json::Value::Bool(false)),
+            select_options: None,
+        },
+        Field {
+            name: "sort".to_string(),
+            label: "Sort by".to_string(),
+            kind: "select".to_string(),
+            value: Some(serde_json::Value::String("seeders".to_string())),
+            select_options: Some(vec![
+                SelectOption {
+                    value: 0,
+                    name: "seeders".to_string(),
+                },
+                SelectOption {
+                    value: 1,
+                    name: "created".to_string(),
+                },
+            ]),
+        },
+    ];
+    let values: HashMap<String, String> = [
+        ("cookie".to_string(), String::new()),
+        ("freeleech".to_string(), "false".to_string()),
+        ("sort".to_string(), "seeders".to_string()),
+    ]
+    .into_iter()
+    .collect();
+
+    let html = indexer_form_view_html(fields, values);
+    let expected = fs::read_to_string(snapshot_path("indexers_add_form.html"))
+        .expect("reading tests/snapshots/indexers_add_form.html");
+    assert_eq!(html, expected.trim_end(), "rendered HTML was:\n{html}");
+    assert!(
+        html.contains("<option"),
+        "expected select options to render, html was:\n{html}"
+    );
+}
+
+#[test]
+fn test_outcome_view_renders_nothing_when_no_test_has_run() {
+    assert_eq!(test_outcome_view_html(None), "");
+}
+
+#[test]
+fn test_outcome_view_renders_a_success_note() {
+    assert_eq!(
+        test_outcome_view_html(Some(TestOutcome::Ok)),
+        r#"<span class="test-result test-result-ok">Test succeeded</span>"#
+    );
+}
+
+#[test]
+fn test_outcome_view_renders_a_problem_message_on_failure() {
+    assert_eq!(
+        test_outcome_view_html(Some(TestOutcome::Failed("bad request".to_string()))),
+        r#"<span class="test-result test-result-failed">bad request</span>"#
+    );
 }

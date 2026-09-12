@@ -1,5 +1,7 @@
-//! One module per screen `crate::app::Route` routes to. Task 3 only ships
-//! [`status`] — the other three nav entries (Indexers/Applications/Search)
-//! are stubbed directly in `crate::app` until their own tasks land.
+//! One module per screen `crate::app::Route` routes to. [`indexers`] and
+//! [`status`] are real screens; the remaining two nav entries
+//! (Applications/Search) are still stubbed directly in `crate::app` until
+//! their own tasks land.
 
+pub mod indexers;
 pub mod status;
