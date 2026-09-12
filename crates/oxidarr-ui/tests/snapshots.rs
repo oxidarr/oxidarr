@@ -48,12 +48,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use oxidarr_ui::components::banner::Banner;
 use oxidarr_ui::components::key_prompt::KeyPrompt;
 use oxidarr_ui::dto::{
-    ApplicationResource, Field, IndexerCapabilities, IndexerResource, SelectOption, SyncLevel,
-    SystemStatus,
+    ApplicationResource, Field, IndexerCapabilities, IndexerResource, ReleaseResource,
+    SelectOption, SyncLevel, SystemStatus,
 };
 use oxidarr_ui::screens::applications::{
     ApplicationFormView, ApplicationListView, TestOutcome as ApplicationTestOutcome,
@@ -62,6 +63,7 @@ use oxidarr_ui::screens::applications::{
 use oxidarr_ui::screens::indexers::{
     IndexerFormView, IndexerListView, TestOutcome, TestOutcomeView,
 };
+use oxidarr_ui::screens::search::{SearchFormView, SearchResultsView, SearchResultsViewProps};
 use oxidarr_ui::screens::status::{StatusView, StatusViewProps};
 
 fn key_prompt_html() -> String {
@@ -397,6 +399,114 @@ fn application_test_outcome_view_html(outcome: Option<ApplicationTestOutcome>) -
     dioxus::ssr::render(&vdom)
 }
 
+/// Reads one committed wire fixture from `oxidarr-prowl`'s own
+/// `tests/fixtures/wire/` — the same two-fixture set (a `seeders: null`
+/// release, a magnet-only release) `tests/wire_parity.rs` pins from the
+/// other direction. Duplicated here rather than shared: this is a separate
+/// integration-test binary, with no path to that file's own private helper.
+fn wire_release_fixture(name: &str) -> ReleaseResource {
+    let path = PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../oxidarr-prowl/tests/fixtures/wire"
+    ))
+    .join(name);
+    let raw = fs::read_to_string(&path).expect("reading wire release fixture");
+    serde_json::from_str(&raw).expect("parsing wire release fixture")
+}
+
+/// A third, hand-authored release rounding the results snapshot's own
+/// fixture set out to three rows — every link kind present, a non-null
+/// `seeders`/`leechers`, and a `publishDate` one calendar day before
+/// [`search_results_now`] — alongside the two committed wire fixtures
+/// (`release_seeders_null.json`, `release_magnet_only.json`), which
+/// exercise the "no seeders reported" and "no download link, magnet only"
+/// shapes this fixture does not.
+fn fixture_release_complete() -> ReleaseResource {
+    ReleaseResource {
+        guid: Some("complete-release-guid".to_string()),
+        title: "Ubuntu.24.04.Desktop.amd64.iso".to_string(),
+        size: 734_003_200, // 700 MiB
+        seeders: Some(10),
+        leechers: Some(2),
+        info_url: Some("https://example.tracker/details/999".to_string()),
+        download_url: Some("https://example.tracker/download/999.torrent".to_string()),
+        magnet_url: Some(
+            "magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&dn=Ubuntu".to_string(),
+        ),
+        indexer_id: 1,
+        indexer: "Example Tracker".to_string(),
+        categories: vec![4000, 4070],
+        publish_date: Some("2026-01-14T11:00:00Z".to_string()),
+        grabs: Some(5),
+        download_volume_factor: 1.0,
+        upload_volume_factor: 1.0,
+    }
+}
+
+/// The fixed "now" the results snapshot renders every row's own age
+/// against — see [`humanize_age`](oxidarr_ui::screens::search::humanize_age)'s
+/// own doc comment for why this is always injected, never read from the
+/// wall clock, in a test.
+fn search_results_now() -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339("2026-01-15T11:00:00Z")
+        .expect("parsing fixture now")
+        .with_timezone(&Utc)
+}
+
+/// [`SearchFormView`] carries `EventHandler` props, same restriction as
+/// [`indexer_list_view_html`] above — see this file's own module docs.
+fn search_form_view_html(
+    query: &str,
+    indexers: Vec<IndexerResource>,
+    selected_indexer_ids: Vec<i32>,
+    categories: &str,
+) -> String {
+    thread_local! {
+        static QUERY: RefCell<String> = const { RefCell::new(String::new()) };
+        static INDEXERS: RefCell<Vec<IndexerResource>> = const { RefCell::new(Vec::new()) };
+        static SELECTED: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+        static CATEGORIES: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+
+    fn root() -> Element {
+        let query = QUERY.with(|cell| cell.borrow().clone());
+        let indexers = INDEXERS.with(|cell| cell.borrow().clone());
+        let selected_indexer_ids = SELECTED.with(|cell| cell.borrow().clone());
+        let categories = CATEGORIES.with(|cell| cell.borrow().clone());
+        rsx! {
+            SearchFormView {
+                query,
+                indexers,
+                selected_indexer_ids,
+                categories,
+                on_query_change: move |_value: String| {},
+                on_indexer_toggle: move |_id: i32| {},
+                on_categories_change: move |_value: String| {},
+                on_search: move |()| {},
+            }
+        }
+    }
+
+    QUERY.with(|cell| *cell.borrow_mut() = query.to_string());
+    INDEXERS.with(|cell| *cell.borrow_mut() = indexers);
+    SELECTED.with(|cell| *cell.borrow_mut() = selected_indexer_ids);
+    CATEGORIES.with(|cell| *cell.borrow_mut() = categories.to_string());
+    let mut vdom = VirtualDom::new(root);
+    vdom.rebuild_in_place();
+    dioxus::ssr::render(&vdom)
+}
+
+/// [`SearchResultsView`] carries no `EventHandler` props (unlike
+/// [`search_form_view_html`] above), so — same as [`status_view_html`] —
+/// its props can be built directly and handed to `VirtualDom::new_with_props`
+/// with no `thread_local` workaround needed.
+fn search_results_view_html(results: Vec<ReleaseResource>, now: DateTime<Utc>) -> String {
+    let props = SearchResultsViewProps { results, now };
+    let mut vdom = VirtualDom::new_with_props(SearchResultsView, props);
+    vdom.rebuild_in_place();
+    dioxus::ssr::render(&vdom)
+}
+
 fn snapshot_path(name: &str) -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/snapshots")).join(name)
 }
@@ -636,4 +746,42 @@ fn application_test_outcome_view_renders_a_problem_message_on_failure() {
             "unexpected status 500 from http://sonarr.example/api/v3/system/status</span>",
         )
     );
+}
+
+#[test]
+fn search_form_with_a_query_a_selected_indexer_and_categories_matches_its_snapshot() {
+    let indexers = vec![
+        fixture_indexer(1, "Example One"),
+        fixture_indexer(2, "Example Two"),
+    ];
+    let html = search_form_view_html("ubuntu", indexers, vec![1], "5000,5030");
+    let expected = fs::read_to_string(snapshot_path("search_form.html"))
+        .expect("reading tests/snapshots/search_form.html");
+    assert_eq!(html, expected.trim_end(), "rendered HTML was:\n{html}");
+}
+
+#[test]
+fn search_results_with_three_releases_matches_its_snapshot() {
+    // Deliberately not in seeders-descending order (10, then 120, then
+    // None) — see `oxidarr_ui::screens::search`'s own doc comment
+    // ("Results are rendered in server order"): this proves
+    // `SearchResultsView` renders exactly the order it was handed, not a
+    // client-side re-sort by `seeders`.
+    let results = vec![
+        fixture_release_complete(),
+        wire_release_fixture("release_magnet_only.json"),
+        wire_release_fixture("release_seeders_null.json"),
+    ];
+    let html = search_results_view_html(results, search_results_now());
+    let expected = fs::read_to_string(snapshot_path("search_results.html"))
+        .expect("reading tests/snapshots/search_results.html");
+    assert_eq!(html, expected.trim_end(), "rendered HTML was:\n{html}");
+}
+
+#[test]
+fn search_results_with_no_releases_matches_its_empty_snapshot() {
+    let html = search_results_view_html(Vec::new(), search_results_now());
+    let expected = fs::read_to_string(snapshot_path("search_results_empty.html"))
+        .expect("reading tests/snapshots/search_results_empty.html");
+    assert_eq!(html, expected.trim_end(), "rendered HTML was:\n{html}");
 }

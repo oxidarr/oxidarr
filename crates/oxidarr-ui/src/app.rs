@@ -39,6 +39,7 @@ use crate::components::layout::Layout;
 use crate::key_store;
 use crate::screens::applications::Applications;
 use crate::screens::indexers::Indexers;
+use crate::screens::search::Search;
 use crate::screens::status::Status;
 
 /// This app's four screens, nested under [`Layout`] so every route shares
@@ -58,15 +59,6 @@ pub enum Route {
         Applications {},
         #[route("/search")]
         Search {},
-}
-
-/// Stands in for the search screen until that task lands (Plan 4's task
-/// 6) — `crate::screens` ships `applications`/`indexers`/`status` today.
-#[component]
-fn Search() -> Element {
-    rsx! {
-        p { "Search is not built yet." }
-    }
 }
 
 /// A placeholder [`Http`] transport used only so [`App`] (and everything
