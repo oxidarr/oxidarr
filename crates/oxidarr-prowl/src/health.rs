@@ -20,7 +20,6 @@ use axum::routing::get;
 use serde_json::{Value, json};
 
 /// Builds the health router: a single unauthenticated `GET /ping`.
-#[must_use]
 pub fn router() -> Router {
     Router::new().route("/ping", get(ping))
 }
