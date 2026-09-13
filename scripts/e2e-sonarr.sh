@@ -232,6 +232,16 @@ wait_for_sonarr_api_key() {
 # including this repo's own test fixtures workflow), that is reused directly
 # instead of re-fetching — much faster, and the acceptance run needs no
 # network access for this step at all.
+#
+# This symlink is deliberately the *only* thing that ever populates
+# $DATA_DIR/definitions for this run: start_oxidarr below exports
+# OXIDARR_DEFINITIONS_AUTO_UPDATE=false precisely so oxidarr-prowl's
+# background updater never touches it. With auto-update at its own default
+# (true), the updater's first pass renames this symlink aside and replaces
+# it with a freshly downloaded set — logging nothing about doing so — which
+# would both destroy the symlink built here and make this acceptance run
+# exercise whatever happens to be upstream right now instead of the
+# checkout's pinned definitions, silently.
 prepare_definitions() {
   local repo_defs="$REPO_ROOT/.definitions/v11"
   if [[ -d "$repo_defs" ]]; then
@@ -262,13 +272,21 @@ start_oxidarr() {
   [[ -x "$bin" ]] || die "expected binary not found at $bin"
 
   log "starting oxidarr-prowl on $OXIDARR_BIND_HOST:$OXIDARR_PORT (external url $OXIDARR_EXTERNAL_URL)"
-  # Only the three variables this run cares about are set; anything else
+  # Only the variables this run cares about are set; anything else
   # OXIDARR_*-shaped in the operator's own shell is deliberately cleared so
   # it can't silently redirect this run at a real config file/proxy/data dir.
   unset OXIDARR_CONFIG OXIDARR_PROXY OXIDARR_LOG 2>/dev/null || true
   export OXIDARR_BIND="${OXIDARR_BIND_HOST}:${OXIDARR_PORT}"
   export OXIDARR_DATA_DIR="$DATA_DIR"
   export OXIDARR_EXTERNAL_URL="$OXIDARR_EXTERNAL_URL"
+  # This run pins its own definitions via the symlink prepare_definitions
+  # built (see that function's own comment). oxidarr-prowl's background
+  # updater defaults to on and would otherwise rename that symlink aside and
+  # replace it with a freshly downloaded set, mid-run and without logging
+  # it — destroying the pin and making the acceptance check exercise
+  # whatever is upstream right now instead of the checkout's own
+  # definitions. Disabling it here keeps the run reproducible.
+  export OXIDARR_DEFINITIONS_AUTO_UPDATE=false
   "$bin" >"$PROWL_LOG" 2>&1 &
   OXIDARR_PID=$!
 }
