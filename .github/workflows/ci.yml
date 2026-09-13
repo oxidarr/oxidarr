@@ -151,7 +151,17 @@ jobs:
           # newline instead of on anything to do with dist/. Deleting any
           # stale artefact first guarantees exactly one file can match.
           rm -f target/package/oxidarr-prowl-*.crate
-          cargo package -p oxidarr-prowl --allow-dirty --no-verify
+          # `-p oxidarr-prowl` alone resolves its sibling path dependencies
+          # (oxidarr-core, oxidarr-db, ...) from crates.io, which only ever
+          # has 0.0.0 published there — verified: once the workspace version
+          # is anything else, that fails outright with "candidate versions
+          # found which didn't match: 0.0.0" before this even gets to look at
+          # dist/, taking down the one check that catches a broken `ui`
+          # include exactly when the version bump makes it matter most.
+          # `--workspace` instead packages every crate, which builds cargo's
+          # own tmp-registry overlay so the siblings resolve locally at
+          # whatever version they actually are.
+          cargo package --workspace --allow-dirty --no-verify
           crate=$(ls target/package/oxidarr-prowl-*.crate)
           if [ "$(tar tzf "$crate" | grep -c '/dist/')" -eq 0 ]; then
             echo "FAIL: no dist/ files in $crate — cargo install --features ui would break" >&2

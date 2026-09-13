@@ -181,7 +181,19 @@ jobs:
 
       # --workspace resolves the dependency graph and publish order itself;
       # none of the nine crates are hand-sequenced here.
+      #
+      # --allow-dirty is required here, not optional: the `ui-bundle`
+      # artifact downloaded above lands in crates/oxidarr-prowl/dist, which
+      # is gitignored, so git sees it as uncommitted changes even though
+      # it's the deliberately-downloaded asset this publish needs (see
+      # ci.yml's publish-dry-run job, which passes the same flag against the
+      # same situation). Without it, packaging aborts with "N files in the
+      # working directory contain changes that were not yet committed into
+      # git" — caught only by reproducing the exact command, because the
+      # dry-run gate above already uses --allow-dirty and so never exercised
+      # this path: a dry run is not a rehearsal of the real command unless
+      # the flags match.
       - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish --workspace
+        run: cargo publish --workspace --allow-dirty
