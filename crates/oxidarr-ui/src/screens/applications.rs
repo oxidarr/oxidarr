@@ -64,6 +64,7 @@ use dioxus::prelude::*;
 use crate::app::{Session, SharedApi, handle_error};
 use crate::components::fields::field_value_as_string;
 use crate::dto::{ApplicationResource, Field, SyncLevel};
+use crate::screens::indexers::row_state_class;
 
 /// Outcome of a `POST /applications/test` probe kept for one row (list) or
 /// the open form (add/edit). See `crate::screens::indexers::TestOutcome`'s
@@ -297,8 +298,15 @@ pub fn ApplicationListView(
 ) -> Element {
     rsx! {
         div { id: "applications-screen",
-            h1 { "Applications" }
-            button { r#type: "button", onclick: move |_| on_add.call(()), "Add application" }
+            div { class: "screen-head",
+                h1 { "Applications" }
+                button {
+                    r#type: "button",
+                    class: "primary",
+                    onclick: move |_| on_add.call(()),
+                    "Add application"
+                }
+            }
             table {
                 thead {
                     tr {
@@ -315,8 +323,16 @@ pub fn ApplicationListView(
                             let id = application.id;
                             let outcome = test_results.get(&id).cloned();
                             let confirming = confirm_delete_id == Some(id);
+                            // An application's "enabled" is its sync level:
+                            // `Disabled` means oxidarr pushes nothing to it,
+                            // which is the same dormant state an unchecked
+                            // indexer is in.
+                            let state = row_state_class(
+                                application.sync_level != SyncLevel::Disabled,
+                                application.sync_error.as_deref(),
+                            );
                             rsx! {
-                                tr { key: "{id}",
+                                tr { key: "{id}", class: "{state}",
                                     td {
                                         "{application.name}"
                                         if let Some(sync_error) = &application.sync_error {
@@ -343,6 +359,7 @@ pub fn ApplicationListView(
                                         if confirming {
                                             button {
                                                 r#type: "button",
+                                                class: "danger",
                                                 onclick: move |_| on_delete_confirm.call(id),
                                                 "Confirm delete"
                                             }
@@ -354,6 +371,7 @@ pub fn ApplicationListView(
                                         } else {
                                             button {
                                                 r#type: "button",
+                                                class: "quiet",
                                                 onclick: move |_| on_delete_request.call(id),
                                                 "Delete"
                                             }
@@ -480,7 +498,7 @@ pub fn ApplicationFormView(
                 }
                 TestOutcomeView { outcome: test_result }
                 button { r#type: "button", onclick: move |_| on_test.call(()), "Test" }
-                button { r#type: "submit", "Save" }
+                button { r#type: "submit", class: "primary", "Save" }
                 button { r#type: "button", onclick: move |_| on_cancel.call(()), "Cancel" }
             }
         }

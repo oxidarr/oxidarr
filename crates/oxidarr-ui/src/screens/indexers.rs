@@ -466,6 +466,23 @@ pub fn TestOutcomeView(outcome: Option<TestOutcome>) -> Element {
     }
 }
 
+/// The status class one list row carries, in the order a reader cares
+/// about: a row whose last sync failed is `is-failed` whether or not it is
+/// enabled (the failure is the thing worth seeing), a disabled row with no
+/// failure is `is-off`, and everything else is `is-live`. The stylesheet
+/// turns this into the row's left-edge colour; the ordering here is the
+/// whole reason that edge is worth scanning.
+#[must_use]
+pub fn row_state_class(enable: bool, sync_error: Option<&str>) -> &'static str {
+    if sync_error.is_some() {
+        "is-failed"
+    } else if enable {
+        "is-live"
+    } else {
+        "is-off"
+    }
+}
+
 /// The list screen's presentational half — see this module's own doc
 /// comment. Every callback fires the affected row's own `id`, except
 /// `on_add` (no row) and `on_delete_cancel` (no id needed to clear the
@@ -485,8 +502,15 @@ pub fn IndexerListView(
 ) -> Element {
     rsx! {
         div { id: "indexers-screen",
-            h1 { "Indexers" }
-            button { r#type: "button", onclick: move |_| on_add.call(()), "Add indexer" }
+            div { class: "screen-head",
+                h1 { "Indexers" }
+                button {
+                    r#type: "button",
+                    class: "primary",
+                    onclick: move |_| on_add.call(()),
+                    "Add indexer"
+                }
+            }
             table {
                 thead {
                     tr {
@@ -504,8 +528,12 @@ pub fn IndexerListView(
                             let id = indexer.id;
                             let outcome = test_results.get(&id).cloned();
                             let confirming = confirm_delete_id == Some(id);
+                            let state = row_state_class(
+                                indexer.enable,
+                                indexer.sync_error.as_deref(),
+                            );
                             rsx! {
-                                tr { key: "{id}",
+                                tr { key: "{id}", class: "{state}",
                                     td {
                                         "{indexer.name}"
                                         if let Some(sync_error) = &indexer.sync_error {
@@ -539,6 +567,7 @@ pub fn IndexerListView(
                                         if confirming {
                                             button {
                                                 r#type: "button",
+                                                class: "danger",
                                                 onclick: move |_| on_delete_confirm.call(id),
                                                 "Confirm delete"
                                             }
@@ -550,6 +579,7 @@ pub fn IndexerListView(
                                         } else {
                                             button {
                                                 r#type: "button",
+                                                class: "quiet",
                                                 onclick: move |_| on_delete_request.call(id),
                                                 "Delete"
                                             }
@@ -1528,5 +1558,29 @@ mod tests {
         let built = build_resource_for_test(&resource);
         assert!(built.enable);
         assert_eq!(built.priority, 42);
+    }
+
+    // --- row status class (the stylesheet's left-edge "status spine") ---
+
+    #[test]
+    fn an_enabled_indexer_with_no_sync_error_is_live() {
+        assert_eq!(row_state_class(true, None), "is-live");
+    }
+
+    #[test]
+    fn a_disabled_indexer_with_no_sync_error_is_off() {
+        assert_eq!(row_state_class(false, None), "is-off");
+    }
+
+    #[test]
+    fn a_sync_error_reads_as_failed_even_while_enabled() {
+        assert_eq!(row_state_class(true, Some("boom")), "is-failed");
+    }
+
+    #[test]
+    fn a_sync_error_outranks_being_disabled() {
+        // The failure is the thing worth seeing: a disabled row that also
+        // failed still shows oxide, not dormant steel.
+        assert_eq!(row_state_class(false, Some("boom")), "is-failed");
     }
 }

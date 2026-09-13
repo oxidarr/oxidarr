@@ -14,6 +14,7 @@ use crate::app::Route;
 pub fn Layout() -> Element {
     rsx! {
         nav {
+            span { class: "wordmark", "oxidarr" }
             Link { to: Route::Indexers {}, "Indexers" }
             Link { to: Route::Applications {}, "Applications" }
             Link { to: Route::Search {}, "Search" }

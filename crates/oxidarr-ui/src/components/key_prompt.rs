@@ -29,7 +29,7 @@ pub fn KeyPrompt(onsubmit: EventHandler<String>) -> Element {
                     value: "{value}",
                     oninput: move |event| value.set(event.value()),
                 }
-                button { r#type: "submit", "Continue" }
+                button { r#type: "submit", class: "primary", "Continue" }
             }
         }
     }

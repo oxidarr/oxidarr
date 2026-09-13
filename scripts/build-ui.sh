@@ -12,6 +12,30 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Deno also ships a binary called `dx`, and on a machine where Homebrew's
+# bin directory precedes ~/.cargo/bin it wins the PATH lookup — producing a
+# baffling "Unable to choose binary for build" from a tool that has nothing
+# to do with Dioxus. Resolve an actual dioxus-cli instead of trusting the
+# name. Override with DX=/path/to/dx if yours lives somewhere else.
+find_dx() {
+  local candidate
+  for candidate in "${DX:-}" "$HOME/.cargo/bin/dx" $(command -v -a dx 2>/dev/null); do
+    [[ -n "$candidate" && -x "$candidate" ]] || continue
+    if "$candidate" --version 2>/dev/null | grep -qi '^dioxus'; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ! dx_bin=$(find_dx); then
+  echo "error: no dioxus-cli found. Install it with 'cargo install dioxus-cli'," >&2
+  echo "       or point DX at an existing one. Note that Deno ships its own" >&2
+  echo "       unrelated 'dx' binary, which may be shadowing it on PATH." >&2
+  exit 1
+fi
+
 profile=release
 build_args=(build --release)
 if [[ "${1:-}" == "--dev" ]]; then
@@ -25,7 +49,7 @@ fi
 # fresh ones and get copied into dist/ below along with them.
 rm -rf "target/dx/oxidarr-ui/$profile"
 
-(cd crates/oxidarr-ui && dx "${build_args[@]}")
+(cd crates/oxidarr-ui && "$dx_bin" "${build_args[@]}")
 
 built="target/dx/oxidarr-ui/$profile/web/public"
 if [[ ! -f "$built/index.html" ]]; then
@@ -36,5 +60,13 @@ fi
 rm -rf crates/oxidarr-ui/dist
 mkdir -p crates/oxidarr-ui/dist
 cp -R "$built"/. crates/oxidarr-ui/dist/
+
+# dx only discovers (and content-hashes) assets reached through an `asset!()`
+# call in Rust; it does not parse `url()` references inside a stylesheet. The
+# two bundled webfonts are named only by assets/app.css, so dx never sees
+# them — they are copied here under their plain, unhashed filenames, which is
+# exactly what that stylesheet's `url("/assets/plex-*.woff2")` asks for.
+cp crates/oxidarr-ui/assets/plex-sans.woff2 crates/oxidarr-ui/assets/plex-mono.woff2 \
+  crates/oxidarr-ui/dist/assets/
 
 echo "wrote $(du -sh crates/oxidarr-ui/dist | cut -f1) to crates/oxidarr-ui/dist"

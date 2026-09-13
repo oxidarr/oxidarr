@@ -529,7 +529,7 @@ fn key_prompt_renders_with_no_key() {
             "<p>Oxidarr printed it at server startup.</p>",
             "<form>",
             r#"<input type="password" placeholder="API key" value=""/>"#,
-            r#"<button type="submit">Continue</button>"#,
+            r#"<button type="submit" class="primary">Continue</button>"#,
             "</form>",
             "</div>",
         )

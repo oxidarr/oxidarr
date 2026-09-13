@@ -304,7 +304,7 @@ pub fn SearchFormView(
                         "Comma-separated newznab category ids, e.g. 5000,5030 for TV SD/HD"
                     }
                 }
-                button { r#type: "submit", "Search" }
+                button { r#type: "submit", class: "primary", "Search" }
             }
         }
     }
