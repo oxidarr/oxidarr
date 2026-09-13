@@ -51,8 +51,17 @@ indexers, and grab a release.
 
 Oxidarr executes [Prowlarr's Cardigann definitions](https://github.com/Prowlarr/Indexers)
 unmodified, targeting schema **v11** (the only version upstream currently supports).
-They are third-party and unlicensed, so they are never committed — fetch them with
-`scripts/fetch-definitions.sh <dest>` (default dest: `.definitions`).
+They are third-party and unlicensed, so they are never committed, and no released
+artefact — container image, `.crate`, release archive — contains them either.
+
+By default, `oxidarr-prowl` fetches and refreshes them itself at runtime: a fresh
+instance serves immediately while the first fetch runs in the background, and every
+`definitions_interval` afterwards it fetches again, replacing the installed set only
+once the new one is fully downloaded and extracted. Set
+`OXIDARR_DEFINITIONS_AUTO_UPDATE=false` to disable this and hand the `definitions/`
+directory back to yourself — in that case fetch it by hand with
+`scripts/fetch-definitions.sh <dest>` (default dest: `.definitions`), as shown in
+step 2 below.
 
 ## Quick start
 
@@ -62,7 +71,8 @@ They are third-party and unlicensed, so they are never committed — fetch them 
    cargo build -p oxidarr-prowl
    ```
 
-2. Fetch the Cardigann definitions. `scripts/fetch-definitions.sh <dest>` writes
+2. **Only if you set `OXIDARR_DEFINITIONS_AUTO_UPDATE=false`** (see the table in step 3):
+   fetch the Cardigann definitions yourself. `scripts/fetch-definitions.sh <dest>` writes
    `<dest>/v11/*.yml`, but `oxidarr-prowl` reads a *flat* `{data_dir}/definitions/*.yml`
    directory (see `crates/oxidarr-prowl/src/definitions.rs`) — one directory level up
    from where the fetch script writes. Point `definitions` at the fetched `v11`
@@ -73,6 +83,12 @@ They are third-party and unlicensed, so they are never committed — fetch them 
    mkdir -p data
    ln -s "$(pwd)/.definitions/v11" data/definitions
    ```
+
+   Leave auto-update at its default (`true`) and skip this step entirely: the server
+   fetches definitions itself in the background and owns `{data_dir}/definitions`
+   outright, replacing whatever it finds there on its first run — a hand-made symlink
+   included, silently, with nothing logged about it. Only do the above by hand when
+   auto-update is disabled.
 
 3. Run it. The database (`oxidarr.db`, migrated automatically on open — `oxidarr-migrate`
    is only needed if you want to apply/inspect migrations without starting the server)
@@ -96,7 +112,14 @@ They are third-party and unlicensed, so they are never committed — fetch them 
    ```
 
    See `crates/oxidarr-prowl/src/config.rs` for every `OXIDARR_*` setting (bind address,
-   proxy, ...) and its file/env precedence.
+   proxy, ...) and its file/env precedence, including the definitions updater's own
+   settings:
+
+   | Field | Env var | Default | Notes |
+   |---|---|---|---|
+   | `definitions_auto_update` | `OXIDARR_DEFINITIONS_AUTO_UPDATE` | `true` | set `false` to manage `definitions/` yourself |
+   | `definitions_interval` | `OXIDARR_DEFINITIONS_INTERVAL` | `86400` | seconds; must be greater than zero |
+   | `definitions_url` | `OXIDARR_DEFINITIONS_URL` | Prowlarr Indexers master tarball | override for a mirror or pinned snapshot |
 
 4. Add it to a real Sonarr as an application:
 

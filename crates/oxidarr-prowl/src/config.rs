@@ -16,8 +16,11 @@
 //! | `bind` | `OXIDARR_BIND` | `"0.0.0.0:9696"` | Prowlarr's own default port |
 //! | `data_dir` | `OXIDARR_DATA_DIR` | `"./data"` | holds `oxidarr.db` and the `definitions/` directory |
 //! | `external_url` | `OXIDARR_EXTERNAL_URL` | `http://{bind}` | see below |
-//! | `proxy` | `OXIDARR_PROXY` | none | tracker traffic only — see `oxidarr_indexer::ReqwestClient::with_proxy` |
+//! | `proxy` | `OXIDARR_PROXY` | none | tracker traffic only — see `oxidarr_indexer::ReqwestClient::with_proxy`; definition fetches always go direct and never route through this |
 //! | `log` | `OXIDARR_LOG` | `"info"` | accepted but unused until a tracing pass wires it up |
+//! | `definitions_auto_update` | `OXIDARR_DEFINITIONS_AUTO_UPDATE` | `true` | set `false` to manage `definitions/` yourself; accepts `true`/`false`/`1`/`0`/`yes`/`no`/`on`/`off`, case-insensitively |
+//! | `definitions_interval` | `OXIDARR_DEFINITIONS_INTERVAL` | `86400` | seconds; must be greater than zero |
+//! | `definitions_url` | `OXIDARR_DEFINITIONS_URL` | Prowlarr Indexers master tarball | override for a mirror or pinned snapshot |
 //!
 //! `external_url`'s default is derived from `bind` *literally* —
 //! `http://0.0.0.0:9696` if `bind` is left at its own default. That is
@@ -45,6 +48,13 @@ pub const DEFAULT_DATA_DIR: &str = "./data";
 const DEFAULT_BIND: &str = "0.0.0.0:9696";
 const DEFAULT_LOG: &str = "info";
 
+/// Upstream source for the Cardigann v11 definitions. The same archive
+/// `scripts/fetch-definitions.sh` downloads — see that script.
+pub const DEFAULT_DEFINITIONS_URL: &str =
+    "https://github.com/Prowlarr/Indexers/archive/refs/heads/master.tar.gz";
+
+const DEFAULT_DEFINITIONS_INTERVAL: u64 = 86_400;
+
 /// Fully resolved instance configuration — the result of merging defaults,
 /// an optional TOML file, and environment overrides. See the module docs
 /// for the full field table and precedence.
@@ -60,12 +70,27 @@ pub struct Config {
     pub external_url: Url,
     /// An optional proxy URL (`http://`/`https://`/`socks5://`/`socks5h://`)
     /// applied to tracker-bound traffic only — see
-    /// `oxidarr_indexer::ReqwestClient::with_proxy`.
+    /// `oxidarr_indexer::ReqwestClient::with_proxy`. Definition-fetch traffic
+    /// (`definitions_sync`) is a third traffic class and always goes direct;
+    /// an operator running behind this proxy specifically to reach GitHub
+    /// should know it is not routed there.
     pub proxy: Option<String>,
     /// A log-level string, accepted for forward compatibility but not yet
     /// consumed by anything — no tracing subscriber is wired up in this
     /// crate yet.
     pub log: String,
+    /// Whether the background updater fetches definitions at all. `false`
+    /// is the air-gapped and pinned-set path: the operator manages
+    /// `{data_dir}/definitions` themselves and nothing is ever fetched.
+    pub definitions_auto_update: bool,
+    /// Seconds between definition refreshes. Seconds as a plain integer,
+    /// not a duration string — see the spec's own reasoning. Never zero;
+    /// `load_config` rejects that rather than treating it as "never",
+    /// which `definitions_auto_update = false` already means.
+    pub definitions_interval: u64,
+    /// The archive the updater downloads. Overridable so an operator can
+    /// point at a mirror or a pinned snapshot.
+    pub definitions_url: String,
 }
 
 /// Failure loading or validating configuration.
@@ -107,6 +132,50 @@ pub enum ConfigError {
         #[source]
         source: url::ParseError,
     },
+    /// `definitions_interval` resolved to zero. Rejected rather than
+    /// silently meaning "never" — `definitions_auto_update = false` is the
+    /// one spelling for that.
+    #[error("definitions_interval must be greater than zero, got {value}")]
+    DefinitionsInterval {
+        /// The rejected value.
+        value: u64,
+    },
+    /// `definitions_interval` was set to something that is not a
+    /// non-negative integer number of seconds.
+    #[error("invalid definitions_interval {value:?}: expected a number of seconds")]
+    DefinitionsIntervalParse {
+        /// The value that failed to parse.
+        value: String,
+        #[source]
+        source: std::num::ParseIntError,
+    },
+    /// `OXIDARR_DEFINITIONS_AUTO_UPDATE` was set to something not recognised
+    /// by [`parse_bool_flag`]. This is the air-gapped escape hatch — the one
+    /// control deciding whether the process makes any network request at
+    /// all — so an unrecognised spelling is rejected outright rather than
+    /// silently resolving to "enabled".
+    #[error(
+        "invalid definitions_auto_update {value:?}: expected one of \
+         true/false/1/0/yes/no/on/off"
+    )]
+    DefinitionsAutoUpdateParse {
+        /// The value that failed to parse.
+        value: String,
+    },
+}
+
+/// Parses a boolean flag from a config-file or environment-variable string,
+/// accepting the common human spellings case-insensitively: `true`/`false`,
+/// `1`/`0`, `yes`/`no`, `on`/`off`. Returns `None` for anything else so the
+/// caller can raise a precise, named error rather than guessing at intent —
+/// see [`ConfigError::DefinitionsAutoUpdateParse`], the one field that uses
+/// this today.
+fn parse_bool_flag(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 /// The TOML file's own shape: every field optional, since any of them may
@@ -123,6 +192,9 @@ struct FileConfig {
     external_url: Option<String>,
     proxy: Option<String>,
     log: Option<String>,
+    definitions_auto_update: Option<bool>,
+    definitions_interval: Option<u64>,
+    definitions_url: Option<String>,
 }
 
 /// Loads and merges configuration: defaults, then `path` (if given and if
@@ -181,12 +253,39 @@ pub fn load_config(
         .or(file.log)
         .unwrap_or_else(|| DEFAULT_LOG.to_string());
 
+    let definitions_auto_update = match env("OXIDARR_DEFINITIONS_AUTO_UPDATE") {
+        Some(value) => match parse_bool_flag(&value) {
+            Some(parsed) => parsed,
+            None => return Err(ConfigError::DefinitionsAutoUpdateParse { value }),
+        },
+        None => file.definitions_auto_update.unwrap_or(true),
+    };
+
+    let definitions_interval = match env("OXIDARR_DEFINITIONS_INTERVAL") {
+        Some(value) => value
+            .parse::<u64>()
+            .map_err(|source| ConfigError::DefinitionsIntervalParse { value, source })?,
+        None => file
+            .definitions_interval
+            .unwrap_or(DEFAULT_DEFINITIONS_INTERVAL),
+    };
+    if definitions_interval == 0 {
+        return Err(ConfigError::DefinitionsInterval { value: 0 });
+    }
+
+    let definitions_url = env("OXIDARR_DEFINITIONS_URL")
+        .or(file.definitions_url)
+        .unwrap_or_else(|| DEFAULT_DEFINITIONS_URL.to_string());
+
     Ok(Config {
         bind,
         data_dir,
         external_url,
         proxy,
         log,
+        definitions_auto_update,
+        definitions_interval,
+        definitions_url,
     })
 }
 
@@ -210,7 +309,7 @@ fn read_file_config(path: &Path) -> Result<FileConfig, ConfigError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
 
@@ -281,6 +380,9 @@ mod tests {
             external_url = "https://from-file.example.com"
             proxy = "http://from-file-proxy:8080"
             log = "debug"
+            definitions_auto_update = false
+            definitions_interval = 111
+            definitions_url = "https://from-file.example.com/definitions.tar.gz"
             "#,
         )
         .unwrap();
@@ -290,6 +392,11 @@ mod tests {
             "OXIDARR_EXTERNAL_URL" => Some("https://from-env.example.com".to_string()),
             "OXIDARR_PROXY" => Some("socks5://from-env-proxy:1080".to_string()),
             "OXIDARR_LOG" => Some("trace".to_string()),
+            "OXIDARR_DEFINITIONS_AUTO_UPDATE" => Some("true".to_string()),
+            "OXIDARR_DEFINITIONS_INTERVAL" => Some("222".to_string()),
+            "OXIDARR_DEFINITIONS_URL" => {
+                Some("https://from-env.example.com/definitions.tar.gz".to_string())
+            }
             _ => None,
         };
 
@@ -306,6 +413,12 @@ mod tests {
             Some("socks5://from-env-proxy:1080")
         );
         assert_eq!(config.log, "trace");
+        assert!(config.definitions_auto_update);
+        assert_eq!(config.definitions_interval, 222);
+        assert_eq!(
+            config.definitions_url,
+            "https://from-env.example.com/definitions.tar.gz"
+        );
     }
 
     #[test]
@@ -384,5 +497,112 @@ mod tests {
         let err = load_config(Some(&path), &no_env).unwrap_err();
 
         assert!(matches!(err, ConfigError::Io { .. }), "err was: {err}");
+    }
+
+    #[test]
+    fn definitions_defaults_are_enabled_daily_and_upstream() {
+        let config = load_config(None, &|_| None).expect("defaults load");
+        assert!(config.definitions_auto_update);
+        assert_eq!(config.definitions_interval, 86_400);
+        assert_eq!(config.definitions_url, DEFAULT_DEFINITIONS_URL);
+    }
+
+    #[test]
+    fn definitions_auto_update_can_be_disabled_by_env() {
+        let config = load_config(None, &|key| {
+            (key == "OXIDARR_DEFINITIONS_AUTO_UPDATE").then(|| "false".to_string())
+        })
+        .expect("env override loads");
+        assert!(!config.definitions_auto_update);
+    }
+
+    #[test]
+    fn definitions_auto_update_accepts_a_falsy_spelling_other_than_false() {
+        // `0` is the likeliest spelling an operator reaches for in a compose
+        // file's environment block; it must disable auto-update exactly
+        // like the literal string "false" does.
+        let config = load_config(None, &|key| {
+            (key == "OXIDARR_DEFINITIONS_AUTO_UPDATE").then(|| "0".to_string())
+        })
+        .expect("a recognised falsy spelling must parse");
+        assert!(!config.definitions_auto_update);
+    }
+
+    #[test]
+    fn definitions_auto_update_accepts_a_truthy_spelling_other_than_true() {
+        let config = load_config(None, &|key| {
+            (key == "OXIDARR_DEFINITIONS_AUTO_UPDATE").then(|| "ON".to_string())
+        })
+        .expect("a recognised truthy spelling must parse, case-insensitively");
+        assert!(config.definitions_auto_update);
+    }
+
+    #[test]
+    fn an_unrecognised_definitions_auto_update_value_is_rejected() {
+        let result = load_config(None, &|key| {
+            (key == "OXIDARR_DEFINITIONS_AUTO_UPDATE").then(|| "maybe".to_string())
+        });
+        assert!(
+            matches!(
+                result,
+                Err(ConfigError::DefinitionsAutoUpdateParse { ref value }) if value == "maybe"
+            ),
+            "result was: {result:?}"
+        );
+    }
+
+    #[test]
+    fn definitions_interval_is_overridden_by_env() {
+        let config = load_config(None, &|key| {
+            (key == "OXIDARR_DEFINITIONS_INTERVAL").then(|| "3600".to_string())
+        })
+        .expect("env override loads");
+        assert_eq!(config.definitions_interval, 3_600);
+    }
+
+    #[test]
+    fn a_zero_definitions_interval_is_rejected() {
+        let result = load_config(None, &|key| {
+            (key == "OXIDARR_DEFINITIONS_INTERVAL").then(|| "0".to_string())
+        });
+        assert!(matches!(
+            result,
+            Err(ConfigError::DefinitionsInterval { value: 0 })
+        ));
+    }
+
+    #[test]
+    fn a_non_numeric_definitions_interval_is_rejected() {
+        let result = load_config(None, &|key| {
+            (key == "OXIDARR_DEFINITIONS_INTERVAL").then(|| "daily".to_string())
+        });
+        assert!(matches!(
+            result,
+            Err(ConfigError::DefinitionsIntervalParse { ref value, .. }) if value == "daily"
+        ));
+    }
+
+    #[test]
+    fn definitions_file_values_override_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+            definitions_auto_update = false
+            definitions_interval = 43_200
+            definitions_url = "https://mirror.example.com/definitions.tar.gz"
+            "#,
+        )
+        .unwrap();
+
+        let config = load_config(Some(&path), &no_env).unwrap();
+
+        assert!(!config.definitions_auto_update);
+        assert_eq!(config.definitions_interval, 43_200);
+        assert_eq!(
+            config.definitions_url,
+            "https://mirror.example.com/definitions.tar.gz"
+        );
     }
 }

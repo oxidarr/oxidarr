@@ -2,22 +2,31 @@
 //!
 //! Loads configuration ([`parse_args`] + [`resolve_config_path`] +
 //! `oxidarr_prowl::load_config`), opens the database (applying embedded
-//! migrations — `oxidarr_db::Db::open`), builds the two HTTP clients
-//! `oxidarr_prowl::AppState` expects (a proxied one for tracker traffic, a
-//! plain one for application-sync traffic — see that struct's own "Two
-//! client fields" docs for why there are two), then serves
+//! migrations — `oxidarr_db::Db::open`), builds the three HTTP clients this
+//! binary needs — the two `oxidarr_prowl::AppState` expects (a proxied one
+//! for tracker traffic, a plain one for application-sync traffic — see that
+//! struct's own "Two client fields" docs for why there are two) plus a
+//! third, timeout-bound client used only by the background definitions
+//! updater (see `oxidarr_prowl::definitions_sync`) — then serves
 //! `oxidarr_prowl::app` with graceful shutdown on Ctrl-C.
 //!
-//! # Definitions are not auto-downloaded
+//! # Definitions
 //!
-//! This binary never fetches the Cardigann definition corpus itself: an
-//! empty or missing `{data_dir}/definitions` directory prints an
-//! instruction to stderr (naming `scripts/fetch-definitions.sh`) and then
-//! *keeps serving* — the control-plane API (config, applications, indexer
-//! CRUD) is useful on its own, and a network call at startup with no retry
-//! story is worse than a clear, actionable message. Every Torznab/Cardigann
-//! search still runs; it simply can't find a definition, which already
-//! renders as a normal `300` error through `oxidarr_prowl::torznab`.
+//! By default (`definitions_auto_update = true`) this binary fetches and
+//! refreshes the Cardigann definition corpus itself, in the background —
+//! see `oxidarr_prowl::definitions_sync::spawn_updater_if_enabled`, which
+//! `run` calls unconditionally and which itself honours the setting.
+//! Startup never blocks on that fetch: an empty or missing `{data_dir}/definitions`
+//! directory prints an advisory to stderr and the process *keeps serving*
+//! regardless — the control-plane API (config, applications, indexer CRUD)
+//! is useful on its own, and every Torznab/Cardigann search still runs; it
+//! simply can't find a definition until the first fetch lands, which
+//! already renders as a normal `300` error through `oxidarr_prowl::torznab`.
+//!
+//! Setting `definitions_auto_update = false` disables the background
+//! fetch entirely and hands the directory back to the operator, who is
+//! then expected to populate it with `scripts/fetch-definitions.sh` (the
+//! stderr advisory says so in that case).
 //!
 //! # The API key is printed at startup
 //!
@@ -100,27 +109,43 @@ fn env_lookup(key: &str) -> Option<String> {
 /// Counts `dir`'s `*.yml` definitions via a fresh `DefinitionStore`, or `0`
 /// if the directory can't be listed at all (doesn't exist, isn't a
 /// directory, etc) — either way this is advisory startup logging, never a
-/// startup failure. See this module's own "Definitions are not
-/// auto-downloaded" docs.
+/// startup failure. See this module's own "Definitions" docs.
 async fn count_definitions(dir: &Path) -> usize {
     let store = DefinitionStore::new(dir.to_path_buf());
     store.list_ids().await.map_or(0, |ids| ids.len())
 }
 
-/// Prints the "go fetch definitions yourself" instruction to stderr. Called
-/// only when `count_definitions` found none.
-fn print_missing_definitions_notice(dir: &Path) {
+/// Prints the missing-definitions notice to stderr. Called only when
+/// `count_definitions` found none.
+///
+/// The instruction depends on `auto_update`: when it is `false`, nothing
+/// will ever populate the directory on its own, so the operator is told to
+/// run `scripts/fetch-definitions.sh` by hand. When it is `true`, the
+/// background updater spawned in `run` is already fetching, so telling the
+/// operator to also do it themselves would be a lie — instead this says
+/// definitions are being fetched in the background and that search results
+/// will be limited until that first fetch completes.
+fn print_missing_definitions_notice(dir: &Path, auto_update: bool) {
     eprintln!(
         "warning: no Cardigann definitions found in {}",
         dir.display()
     );
-    eprintln!(
-        "oxidarr-prowl does not fetch definitions automatically; \
-         scripts/fetch-definitions.sh writes into <dest>/v11/, one \
-         directory level below {} — see the README's \"Quick start\" step \
-         2 for the exact fetch-and-symlink commands.",
-        dir.display()
-    );
+    if auto_update {
+        eprintln!(
+            "oxidarr-prowl is fetching them in the background; search and \
+             t=caps for Cardigann indexers will be limited until that \
+             first fetch completes."
+        );
+    } else {
+        eprintln!(
+            "oxidarr-prowl is configured not to fetch definitions \
+             automatically (OXIDARR_DEFINITIONS_AUTO_UPDATE=false); \
+             scripts/fetch-definitions.sh writes into <dest>/v11/, one \
+             directory level below {} — see the README's \"Quick start\" \
+             step 2 for the exact fetch-and-symlink commands.",
+            dir.display()
+        );
+    }
     eprintln!(
         "the control-plane API will continue to serve without them — this \
          only affects search and t=caps for indexers whose definitions are \
@@ -171,10 +196,10 @@ async fn run(config: Config) -> Result<(), String> {
         .map_err(|err| format!("opening database {}: {err}", db_path.display()))?;
     let db = Arc::new(db);
 
-    let definitions_dir = config.data_dir.join("definitions");
+    let definitions_dir = oxidarr_prowl::definitions_sync::definitions_dir(&config.data_dir);
     let definitions_count = count_definitions(&definitions_dir).await;
     if definitions_count == 0 {
-        print_missing_definitions_notice(&definitions_dir);
+        print_missing_definitions_notice(&definitions_dir, config.definitions_auto_update);
     }
 
     let (tracker_client, app_client) = build_clients(&config)?;
@@ -186,6 +211,7 @@ async fn run(config: Config) -> Result<(), String> {
         defs: DefinitionStore::new(definitions_dir),
         external_url: config.external_url.clone(),
     };
+    let updater_defs = state.defs.clone();
 
     let api_key = ConfigRepo::new(&db)
         .api_key()
@@ -201,6 +227,24 @@ async fn run(config: Config) -> Result<(), String> {
         .map_err(|err| format!("binding {}: {err}", config.bind))?;
 
     print_startup_banner(&config, definitions_count, &api_key);
+
+    let definitions_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_mins(5))
+        .build()
+        .map_err(|err| format!("building the definitions HTTP client: {err}"))?;
+
+    // The return value only matters to tests exercising the enabled/disabled
+    // gate directly (see `definitions_sync::spawn_updater_if_enabled`'s own
+    // tests); `run` itself has nothing further to do with it.
+    let _ = oxidarr_prowl::definitions_sync::spawn_updater_if_enabled(
+        definitions_client,
+        config.definitions_url.clone(),
+        config.data_dir.clone(),
+        std::time::Duration::from_secs(config.definitions_interval),
+        updater_defs,
+        oxidarr_prowl::definitions_sync::should_sync_now(definitions_count),
+        config.definitions_auto_update,
+    );
 
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())

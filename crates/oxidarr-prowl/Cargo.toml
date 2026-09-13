@@ -25,11 +25,14 @@ oxidarr-indexer = { workspace = true }
 axum = { workspace = true }
 quick-xml = { workspace = true }
 chrono = { workspace = true }
+flate2 = { workspace = true }
 include_dir = { workspace = true, optional = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tar = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["fs", "signal", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["fs", "signal", "rt-multi-thread", "time", "net", "io-util"] }
 toml = { workspace = true }
 url = { workspace = true }
 
