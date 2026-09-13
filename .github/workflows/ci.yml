@@ -69,6 +69,17 @@ jobs:
         run: |
           grep -q 'id="oxidarr-app"' dist/index.html
           ! grep -q 'oxidarr-ui-stub' dist/index.html
+      - name: Upload the web ui bundle
+        # publish-dry-run needs this exact bundle to check the packaged
+        # `.crate` for real, without paying for its own dioxus-cli install
+        # and dx build — see that job for why. Uploading here guarantees
+        # both jobs test byte-identical assets rather than two independent
+        # builds that could drift.
+        uses: actions/upload-artifact@v4
+        with:
+          name: oxidarr-prowl-dist
+          path: crates/oxidarr-prowl/dist
+          if-no-files-found: error
       - name: Force a rebuild of the embedded ui bundle
         # `include_dir!` only calls `tracked_path::path` (the thing that
         # would tell cargo/rustc "recompile if this file changes") behind
@@ -99,6 +110,13 @@ jobs:
   publish-dry-run:
     name: cargo publish --dry-run
     runs-on: ubuntu-latest
+    # The `ui` job already builds this exact bundle (and proves it's real,
+    # not a stale/stub one — see its own "Verify the built bundle is real"
+    # step). Depending on it and downloading the artifact below means this
+    # job never needs its own dioxus-cli install or dx build — several
+    # fewer minutes on every pull request — and both jobs test
+    # byte-identical assets rather than two independently-built ones.
+    needs: ui
     steps:
       - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
@@ -106,20 +124,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.95.0"
-          targets: wasm32-unknown-unknown
 
-      - name: Install dioxus-cli
-        # See the `ui` job above for why RUSTFLAGS is cleared just for this
-        # step: the workflow-level `-D warnings` is meant for this repo's
-        # own crates, not the ~600 third-party crates this install compiles.
-        env:
-          RUSTFLAGS: ""
-        run: cargo install dioxus-cli --locked --version 0.7.10
-
-      # oxidarr-prowl's `include` lists the built bundle, so packaging fails
+      # oxidarr-prowl's `include` lists this bundle, so packaging fails
       # outright if it has not been built first.
-      - name: Build the web ui bundle
-        run: ./scripts/build-ui.sh
+      - name: Download the web ui bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: oxidarr-prowl-dist
+          path: crates/oxidarr-prowl/dist
 
       - name: Dry run
         run: cargo publish --workspace --dry-run --allow-dirty
+
+      - name: The published crate must carry the web bundle
+        # The dry run above builds default features only, so it cannot see a
+        # broken `ui` asset include — verified: removing `dist/**/*` from the
+        # include leaves the dry run at exit 0. This is the check that does
+        # catch it, by looking inside the packaged crate.
+        run: |
+          set -euo pipefail
+          cargo package -p oxidarr-prowl --allow-dirty --no-verify
+          crate=$(ls target/package/oxidarr-prowl-*.crate)
+          if [ "$(tar tzf "$crate" | grep -c '/dist/')" -eq 0 ]; then
+            echo "FAIL: no dist/ files in $crate — cargo install --features ui would break" >&2
+            exit 1
+          fi
