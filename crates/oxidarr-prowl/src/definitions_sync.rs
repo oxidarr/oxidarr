@@ -177,12 +177,104 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Downloads `url`, extracts it into a staging directory beside
+/// `{data_dir}/definitions`, and installs it atomically. Returns how many
+/// definitions were installed.
+///
+/// Staging is cleared before use and on every failure path, so a previous
+/// interrupted run can never contaminate this one. `{data_dir}/definitions`
+/// is only ever touched by the final [`install_definitions`] call — every
+/// error before that point leaves the existing set exactly as it was.
+///
+/// # Errors
+///
+/// [`SyncError::Download`] for a transport failure or a non-success status,
+/// and whatever [`extract_definitions`] or [`install_definitions`] return.
+pub async fn sync_once(
+    client: &reqwest::Client,
+    url: &str,
+    data_dir: &Path,
+) -> Result<usize, SyncError> {
+    let body = download(client, url).await?;
+
+    let live = data_dir.join("definitions");
+    let staging = with_suffix(&live, ".staging");
+
+    let result = stage(&body, &staging).and_then(|count| {
+        install_definitions(&staging, &live)?;
+        Ok(count)
+    });
+
+    if result.is_err() && staging.exists() {
+        // Best effort: the next run clears staging before using it anyway,
+        // so a failure to clean up here must not mask the real error.
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+/// Fetches `url`'s body, turning a non-success status into an error rather
+/// than extracting an error page as though it were an archive.
+async fn download(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, SyncError> {
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|source| SyncError::Download {
+            url: url.to_string(),
+            source,
+        })?;
+    let bytes = response.bytes().await.map_err(|source| SyncError::Download {
+        url: url.to_string(),
+        source,
+    })?;
+    Ok(bytes.to_vec())
+}
+
+/// Creates a clean `staging` directory and extracts `body` into it.
+fn stage(body: &[u8], staging: &Path) -> Result<usize, SyncError> {
+    if staging.exists() {
+        std::fs::remove_dir_all(staging).map_err(|source| SyncError::Io {
+            action: "clearing the staging directory",
+            path: staging.to_path_buf(),
+            source,
+        })?;
+    }
+    std::fs::create_dir_all(staging).map_err(|source| SyncError::Io {
+        action: "creating the staging directory",
+        path: staging.to_path_buf(),
+        source,
+    })?;
+    extract_definitions(body, staging)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
     const SAMPLE: &[u8] = include_bytes!("../tests/fixtures/definitions-sample.tar.gz");
+
+    /// Serves `body` once on loopback and returns its URL. The listener is
+    /// bound to port 0, so the OS picks a free port and tests never collide.
+    async fn serve_once(body: &'static [u8], status: u16) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let head = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes()).await;
+                let _ = stream.write_all(body).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        format!("http://{addr}/definitions.tar.gz")
+    }
 
     #[test]
     fn extraction_writes_only_the_v11_yml_files() {
@@ -318,5 +410,75 @@ mod tests {
         assert!(live.join("fresh.yml").is_file());
         assert!(!live.join("current.yml").exists());
         assert!(!stranded.exists(), "the stranded directory survived");
+    }
+
+    #[test]
+    fn stage_clears_a_leftover_staging_directory_before_extracting() {
+        // A previous crashed run could leave files in staging that don't
+        // exist in the new archive at all. `stage`'s doc claims a clean
+        // directory every time; if it merely extracted into whatever was
+        // already there, `sync_once`'s "staging can never be contaminated"
+        // guarantee would be hollow. Proven directly against `stage` rather
+        // than through `sync_once`, since a clean tempdir alone can never
+        // exercise this path.
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("definitions.staging");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("stale-from-a-crashed-run.yml"), "id: stale\n").unwrap();
+
+        let count = stage(SAMPLE, &staging).unwrap();
+
+        assert_eq!(count, 2);
+        assert!(
+            !staging.join("stale-from-a-crashed-run.yml").exists(),
+            "stage left a file from a previous run in place"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_successful_sync_installs_the_definitions() {
+        let root = tempfile::tempdir().unwrap();
+        let url = serve_once(SAMPLE, 200).await;
+
+        let count = sync_once(&reqwest::Client::new(), &url, root.path())
+            .await
+            .unwrap();
+
+        assert_eq!(count, 2);
+        assert!(root.path().join("definitions/alpha.yml").is_file());
+    }
+
+    #[tokio::test]
+    async fn a_failed_download_leaves_existing_definitions_untouched() {
+        let root = tempfile::tempdir().unwrap();
+        let live = root.path().join("definitions");
+        std::fs::create_dir(&live).unwrap();
+        std::fs::write(live.join("keep.yml"), "id: keep\n").unwrap();
+
+        let url = serve_once(b"", 500).await;
+        let result = sync_once(&reqwest::Client::new(), &url, root.path()).await;
+
+        assert!(result.is_err());
+        assert!(
+            live.join("keep.yml").is_file(),
+            "a failed refresh destroyed the working set"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_sync_leaves_no_staging_directory_behind() {
+        // Also plants a leftover staging directory from a hypothetical
+        // earlier crashed run, so this proves the failure path cleans up
+        // for real rather than merely never having created anything.
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("definitions.staging");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("stale-from-a-crashed-run.yml"), "id: stale\n").unwrap();
+
+        let url = serve_once(b"not a gzip stream", 200).await;
+
+        let _ = sync_once(&reqwest::Client::new(), &url, root.path()).await;
+
+        assert!(!staging.exists(), "staging leaked after a failure");
     }
 }
