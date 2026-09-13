@@ -1,0 +1,135 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  # The compiled wasm bundle is platform-independent. Building it once and
+  # sharing it keeps dioxus-cli off the macOS and Windows runners entirely,
+  # and guarantees all four binaries embed byte-identical assets.
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+          targets: wasm32-unknown-unknown
+      - run: cargo install dioxus-cli --locked --version 0.7.10
+      - run: ./scripts/build-ui.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-bundle
+          path: crates/oxidarr-prowl/dist
+          if-no-files-found: error
+
+  binaries:
+    needs: bundle
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            archive: tar.gz
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            archive: tar.gz
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      # Must land before cargo build: --features ui embeds this directory
+      # at compile time.
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-bundle
+          path: crates/oxidarr-prowl/dist
+
+      - name: Build
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p oxidarr-prowl --features ui
+          cargo build --release --target ${{ matrix.target }} -p oxidarr-migrate
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          name="oxidarr-${version}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          bindir="target/${{ matrix.target }}/release"
+          for bin in oxidarr-prowl oxidarr-migrate; do
+            if [ -f "${bindir}/${bin}.exe" ]; then
+              cp "${bindir}/${bin}.exe" "dist/${name}/"
+            else
+              cp "${bindir}/${bin}" "dist/${name}/"
+            fi
+          done
+          cp README.md LICENSE "dist/${name}/"
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a "${name}.zip" "${name}"
+          else
+            tar czf "${name}.tar.gz" "${name}"
+          fi
+          # Checksums are generated beside each archive so a downloader can
+          # verify without trusting the release page's rendering. `sha256sum`
+          # covers Linux and the Windows runner's Git-Bash coreutils, but
+          # macOS runners ship neither GNU coreutils nor `sha256sum` — only
+          # BSD `shasum`. Fall back to that rather than assuming one command
+          # works everywhere this step runs.
+          for f in "${name}".*; do
+            case "$f" in
+              *.tar.gz|*.zip)
+                if command -v sha256sum >/dev/null 2>&1; then
+                  sha256sum "$f" > "$f.sha256"
+                else
+                  shasum -a 256 "$f" > "$f.sha256"
+                fi
+                ;;
+            esac
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
