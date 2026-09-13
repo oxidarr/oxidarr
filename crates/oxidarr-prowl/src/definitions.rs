@@ -4,14 +4,15 @@
 //! This replaces `server`'s former uncached `load_definition` (see git
 //! history): every `t=caps` and every Cardigann-kind search used to read
 //! and parse `<definition_id>.yml` from scratch, on every request. This
-//! store only ever reads a local directory that is assumed to already be
-//! populated — the binary never fetches the definition corpus itself; on
-//! an empty or missing directory it prints an instruction naming
-//! `scripts/fetch-definitions.sh` and keeps serving regardless (see
-//! `oxidarr-prowl`'s own `src/main.rs`, "Definitions are not
-//! auto-downloaded"). Running that script, and pointing this store's
-//! directory at what it wrote, is the operator's own documented setup step
-//! (the README's "Quick start").
+//! store only ever reads whatever is already in its directory and serves
+//! regardless of what it finds there, empty or missing included — it never
+//! fetches anything itself. Keeping that directory populated is
+//! `crate::definitions_sync`'s job: by default it runs a background
+//! updater that fetches and refreshes it on an interval (see
+//! `oxidarr-prowl`'s own `src/main.rs`, "Definitions"); with
+//! `definitions_auto_update` turned off, the operator manages the
+//! directory themselves with `scripts/fetch-definitions.sh` (the README's
+//! "Quick start").
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
