@@ -175,8 +175,12 @@ Cardigann definition to add, ports, the Sonarr image, ...).
 ## Docker
 
 ```sh
-docker compose -f docs/docker-compose.yml up -d
-docker compose -f docs/docker-compose.yml logs | grep 'api key'
+# No image is published yet. Build it locally first, under the exact tag
+# the compose file pins:
+docker build -t ghcr.io/oxidarr/oxidarr-prowl:0.1.0 .
+
+docker compose -p oxidarr -f docs/docker-compose.yml up -d
+docker compose -p oxidarr -f docs/docker-compose.yml logs | grep 'api key'
 ```
 
 That compose file (`docs/docker-compose.yml`) is the recommended way to run `oxidarr-prowl`;
@@ -198,6 +202,14 @@ they are fetched on the operator's own machine, on the operator's own machine's 
 time. For an air-gapped host, or one you want pinned to a definition set you already
 vetted, set `OXIDARR_DEFINITIONS_AUTO_UPDATE=false` in the compose file's `environment:`
 block and manage `/data/definitions` yourself.
+
+Populating it yourself means something different in a container than on bare metal: the
+startup notice's instructions to run `scripts/fetch-definitions.sh` and see "Quick start
+step 2" assume a source checkout, and neither the script nor the rest of the repo exists
+inside the image, which holds only the two compiled binaries. Instead, put a flat set of
+`*.yml` files directly into the named volume's `definitions/` directory yourself — for
+example `docker cp` them in before or after first start, or prepare a bind mount ahead of
+time — mindful of the ownership note below.
 
 The compose file mounts a named volume, `oxidarr-data`, rather than a host directory,
 because the image only seeds `/data`'s ownership for a named volume — Docker copies the

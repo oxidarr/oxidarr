@@ -28,7 +28,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd --system --create-home --uid 10001 oxidarr
+RUN useradd --system --create-home --user-group --uid 10001 oxidarr
 
 COPY --from=builder /src/target/release/oxidarr-prowl /usr/local/bin/
 COPY --from=builder /src/target/release/oxidarr-migrate /usr/local/bin/
