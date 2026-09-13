@@ -96,7 +96,14 @@ They are third-party and unlicensed, so they are never committed — fetch them 
    ```
 
    See `crates/oxidarr-prowl/src/config.rs` for every `OXIDARR_*` setting (bind address,
-   proxy, ...) and its file/env precedence.
+   proxy, ...) and its file/env precedence, including the definitions updater's own
+   settings:
+
+   | Field | Env var | Default | Notes |
+   |---|---|---|---|
+   | `definitions_auto_update` | `OXIDARR_DEFINITIONS_AUTO_UPDATE` | `true` | set `false` to manage `definitions/` yourself |
+   | `definitions_interval` | `OXIDARR_DEFINITIONS_INTERVAL` | `86400` | seconds; must be greater than zero |
+   | `definitions_url` | `OXIDARR_DEFINITIONS_URL` | Prowlarr Indexers master tarball | override for a mirror or pinned snapshot |
 
 4. Add it to a real Sonarr as an application:
 

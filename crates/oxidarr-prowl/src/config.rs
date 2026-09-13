@@ -18,6 +18,9 @@
 //! | `external_url` | `OXIDARR_EXTERNAL_URL` | `http://{bind}` | see below |
 //! | `proxy` | `OXIDARR_PROXY` | none | tracker traffic only — see `oxidarr_indexer::ReqwestClient::with_proxy` |
 //! | `log` | `OXIDARR_LOG` | `"info"` | accepted but unused until a tracing pass wires it up |
+//! | `definitions_auto_update` | `OXIDARR_DEFINITIONS_AUTO_UPDATE` | `true` | set `false` to manage `definitions/` yourself |
+//! | `definitions_interval` | `OXIDARR_DEFINITIONS_INTERVAL` | `86400` | seconds; must be greater than zero |
+//! | `definitions_url` | `OXIDARR_DEFINITIONS_URL` | Prowlarr Indexers master tarball | override for a mirror or pinned snapshot |
 //!
 //! `external_url`'s default is derived from `bind` *literally* —
 //! `http://0.0.0.0:9696` if `bind` is left at its own default. That is
@@ -45,6 +48,13 @@ pub const DEFAULT_DATA_DIR: &str = "./data";
 const DEFAULT_BIND: &str = "0.0.0.0:9696";
 const DEFAULT_LOG: &str = "info";
 
+/// Upstream source for the Cardigann v11 definitions. The same archive
+/// `scripts/fetch-definitions.sh` downloads — see that script.
+pub const DEFAULT_DEFINITIONS_URL: &str =
+    "https://github.com/Prowlarr/Indexers/archive/refs/heads/master.tar.gz";
+
+const DEFAULT_DEFINITIONS_INTERVAL: u64 = 86_400;
+
 /// Fully resolved instance configuration — the result of merging defaults,
 /// an optional TOML file, and environment overrides. See the module docs
 /// for the full field table and precedence.
@@ -66,6 +76,18 @@ pub struct Config {
     /// consumed by anything — no tracing subscriber is wired up in this
     /// crate yet.
     pub log: String,
+    /// Whether the background updater fetches definitions at all. `false`
+    /// is the air-gapped and pinned-set path: the operator manages
+    /// `{data_dir}/definitions` themselves and nothing is ever fetched.
+    pub definitions_auto_update: bool,
+    /// Seconds between definition refreshes. Seconds as a plain integer,
+    /// not a duration string — see the spec's own reasoning. Never zero;
+    /// `load_config` rejects that rather than treating it as "never",
+    /// which `definitions_auto_update = false` already means.
+    pub definitions_interval: u64,
+    /// The archive the updater downloads. Overridable so an operator can
+    /// point at a mirror or a pinned snapshot.
+    pub definitions_url: String,
 }
 
 /// Failure loading or validating configuration.
@@ -107,6 +129,21 @@ pub enum ConfigError {
         #[source]
         source: url::ParseError,
     },
+    /// `definitions_interval` resolved to zero. Rejected rather than
+    /// silently meaning "never" — `definitions_auto_update = false` is the
+    /// one spelling for that.
+    #[error("definitions_interval must be greater than zero, got {value}")]
+    DefinitionsInterval {
+        /// The rejected value.
+        value: u64,
+    },
+    /// `definitions_interval` was set to something that is not a
+    /// non-negative integer number of seconds.
+    #[error("invalid definitions_interval {value:?}: expected a number of seconds")]
+    DefinitionsIntervalParse {
+        /// The value that failed to parse.
+        value: String,
+    },
 }
 
 /// The TOML file's own shape: every field optional, since any of them may
@@ -123,6 +160,9 @@ struct FileConfig {
     external_url: Option<String>,
     proxy: Option<String>,
     log: Option<String>,
+    definitions_auto_update: Option<bool>,
+    definitions_interval: Option<u64>,
+    definitions_url: Option<String>,
 }
 
 /// Loads and merges configuration: defaults, then `path` (if given and if
@@ -181,12 +221,36 @@ pub fn load_config(
         .or(file.log)
         .unwrap_or_else(|| DEFAULT_LOG.to_string());
 
+    let definitions_auto_update = env("OXIDARR_DEFINITIONS_AUTO_UPDATE")
+        .map(|value| value != "false")
+        .or(file.definitions_auto_update)
+        .unwrap_or(true);
+
+    let definitions_interval = match env("OXIDARR_DEFINITIONS_INTERVAL") {
+        Some(value) => value
+            .parse::<u64>()
+            .map_err(|_| ConfigError::DefinitionsIntervalParse { value })?,
+        None => file
+            .definitions_interval
+            .unwrap_or(DEFAULT_DEFINITIONS_INTERVAL),
+    };
+    if definitions_interval == 0 {
+        return Err(ConfigError::DefinitionsInterval { value: 0 });
+    }
+
+    let definitions_url = env("OXIDARR_DEFINITIONS_URL")
+        .or(file.definitions_url)
+        .unwrap_or_else(|| DEFAULT_DEFINITIONS_URL.to_string());
+
     Ok(Config {
         bind,
         data_dir,
         external_url,
         proxy,
         log,
+        definitions_auto_update,
+        definitions_interval,
+        definitions_url,
     })
 }
 
@@ -210,7 +274,7 @@ fn read_file_config(path: &Path) -> Result<FileConfig, ConfigError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
 
@@ -384,5 +448,53 @@ mod tests {
         let err = load_config(Some(&path), &no_env).unwrap_err();
 
         assert!(matches!(err, ConfigError::Io { .. }), "err was: {err}");
+    }
+
+    #[test]
+    fn definitions_defaults_are_enabled_daily_and_upstream() {
+        let config = load_config(None, &|_| None).expect("defaults load");
+        assert!(config.definitions_auto_update);
+        assert_eq!(config.definitions_interval, 86_400);
+        assert_eq!(config.definitions_url, DEFAULT_DEFINITIONS_URL);
+    }
+
+    #[test]
+    fn definitions_auto_update_can_be_disabled_by_env() {
+        let config = load_config(None, &|key| {
+            (key == "OXIDARR_DEFINITIONS_AUTO_UPDATE").then(|| "false".to_string())
+        })
+        .expect("env override loads");
+        assert!(!config.definitions_auto_update);
+    }
+
+    #[test]
+    fn definitions_interval_is_overridden_by_env() {
+        let config = load_config(None, &|key| {
+            (key == "OXIDARR_DEFINITIONS_INTERVAL").then(|| "3600".to_string())
+        })
+        .expect("env override loads");
+        assert_eq!(config.definitions_interval, 3_600);
+    }
+
+    #[test]
+    fn a_zero_definitions_interval_is_rejected() {
+        let result = load_config(None, &|key| {
+            (key == "OXIDARR_DEFINITIONS_INTERVAL").then(|| "0".to_string())
+        });
+        assert!(matches!(
+            result,
+            Err(ConfigError::DefinitionsInterval { value: 0 })
+        ));
+    }
+
+    #[test]
+    fn a_non_numeric_definitions_interval_is_rejected() {
+        let result = load_config(None, &|key| {
+            (key == "OXIDARR_DEFINITIONS_INTERVAL").then(|| "daily".to_string())
+        });
+        assert!(matches!(
+            result,
+            Err(ConfigError::DefinitionsIntervalParse { ref value }) if value == "daily"
+        ));
     }
 }
