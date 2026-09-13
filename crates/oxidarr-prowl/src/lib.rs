@@ -37,6 +37,7 @@
 pub mod api;
 pub mod config;
 pub mod definitions;
+pub mod definitions_sync;
 pub mod server;
 pub mod sync;
 pub mod torznab;

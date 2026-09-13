@@ -62,6 +62,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 
+# archive handling
+flate2 = "1"
+tar = "0.4"
+
 # web ui
 dioxus = { version = "0.7", features = ["web", "router"] }
 include_dir = "0.7"
