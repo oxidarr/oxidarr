@@ -188,11 +188,17 @@ That script runs `dx build --release` in `crates/oxidarr-ui` and copies the resu
 `crates/oxidarr-ui/dist` — dioxus-cli 0.7.10's `dx build` does not write there itself for
 a web build (see the script's own comment for exactly where it does write, and why).
 
-> If Homebrew's own `dx` (a `deno x` alias some Deno installs put on `PATH` first) shadows
-> dioxus-cli's `dx`, `./scripts/build-ui.sh` will fail confusingly (trying to fetch npm
-> packages instead of building anything). Check with `dx --version` — dioxus-cli prints
-> `dioxus 0.7.10 (...)`; anything mentioning `deno` means `~/.cargo/bin` needs to come
-> first on `PATH`, or call `~/.cargo/bin/dx` directly.
+> Deno also ships a binary called `dx`, and on a machine where its install directory
+> precedes `~/.cargo/bin` on `PATH` it wins the name. The script checks `dx --version` and
+> uses the first one that identifies itself as `dioxus`, so this resolves itself; set `DX`
+> to an explicit path if yours lives somewhere unusual. Calling `dx build` by hand instead
+> will hit the shadowed binary and fail with `Unable to choose binary for build`.
+>
+> The same ordering affects `rustc`: if a non-rustup Rust (Homebrew's, typically) comes
+> first on `PATH`, `dx` will use it and stop with `Missing rust target
+> wasm32-unknown-unknown` even though `rustup target add` reported success — it added the
+> target to a toolchain that is not the one being run. Put `~/.cargo/bin` first, or run
+> `PATH="$HOME/.cargo/bin:$PATH" ./scripts/build-ui.sh`.
 
 Then run the server with the UI compiled in:
 
@@ -205,8 +211,19 @@ first load it prompts for the instance's API key, the same one the startup banne
 (see step 3 of [Quick start](#quick-start)) — and keeps it in the browser's own storage
 after that, until cleared or until the server answers `401`.
 
-Screenshots will land here once the UI's look has settled; it's plain and functional today
-(see `crates/oxidarr-ui/assets/app.css`), not yet a fixed target worth freezing a picture of.
+The interface is built around one question: which of your things are working? Every row
+and panel carries a coloured left edge reading healthy, failed, or dormant — a failure
+outranks being disabled, so an indexer that is both still reads as broken. Everything
+around that stays deliberately quiet.
+
+Type is IBM Plex Sans, with IBM Plex Mono reserved for machine data (Torznab URLs, keys,
+sizes, swarm counts). Both are bundled as latin-subset `woff2` files in
+`crates/oxidarr-ui/assets` rather than fetched from a font CDN, since these servers are
+frequently offline; they are licensed under the SIL Open Font License 1.1, included there
+as `PLEX-LICENSE.txt`. The stylesheet is a single file, `assets/app.css`, with the design's
+reasoning in its header comment.
+
+Screenshots will land here once the look has had some use behind it.
 
 ## Building
 
