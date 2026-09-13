@@ -716,7 +716,7 @@ pub fn IndexerFormView(
                 }
                 TestOutcomeView { outcome: test_result }
                 button { r#type: "button", onclick: move |_| on_test.call(()), "Test" }
-                button { r#type: "submit", "Save" }
+                button { r#type: "submit", class: "primary", "Save" }
                 button { r#type: "button", onclick: move |_| on_cancel.call(()), "Cancel" }
             }
         }
