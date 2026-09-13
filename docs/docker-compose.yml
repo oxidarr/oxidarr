@@ -1,0 +1,31 @@
+# Oxidarr — Prowlarr-compatible indexer manager.
+#
+#   docker compose -f docs/docker-compose.yml up -d
+#
+# The API key is printed in the logs on first start:
+#   docker compose -f docs/docker-compose.yml logs | grep 'api key'
+
+services:
+  oxidarr-prowl:
+    image: ghcr.io/oxidarr/oxidarr-prowl:0.1.0
+    container_name: oxidarr-prowl
+    restart: unless-stopped
+    ports:
+      - "9696:9696"
+    volumes:
+      # Holds the database and the fetched definitions. Without a named
+      # volume both are lost on `docker compose down`.
+      - oxidarr-data:/data
+    environment:
+      # Set this to the address other applications reach Oxidarr on. It is
+      # written verbatim into every indexer Oxidarr syncs into Sonarr or
+      # Radarr, so a wrong value here is a wrong value in their config too.
+      # The default is derived from the bind address and is never reachable
+      # through a port mapping.
+      OXIDARR_EXTERNAL_URL: http://localhost:9696
+      # Optional. Oxidarr fetches its Cardigann definitions itself, daily.
+      # Set to false if you manage /data/definitions yourself.
+      # OXIDARR_DEFINITIONS_AUTO_UPDATE: "false"
+
+volumes:
+  oxidarr-data:

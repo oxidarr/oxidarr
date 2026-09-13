@@ -170,6 +170,40 @@ It needs a working `docker` and network access, and is **not** run in CI:
 Run `./scripts/e2e-sonarr.sh --help` for every environment variable it reads (which
 Cardigann definition to add, ports, the Sonarr image, ...).
 
+## Docker
+
+```sh
+docker compose -f docs/docker-compose.yml up -d
+docker compose -f docs/docker-compose.yml logs | grep 'api key'
+```
+
+That compose file (`docs/docker-compose.yml`) is the recommended way to run `oxidarr-prowl`;
+the startup banner's instance API key is the only place it is surfaced, and the `grep` above
+is the fastest way to it. The image is pinned to a specific tag rather than `latest`, so an
+unattended `docker compose pull` cannot hand you a different major version overnight.
+
+Set `OXIDARR_EXTERNAL_URL` to the address other machines reach this container on before you
+start it. It is written verbatim into every indexer Oxidarr syncs into Sonarr or Radarr, so
+if it is left at its container-internal default, every one of those syncs hands Sonarr and
+Radarr a `baseUrl` they cannot reach — the indexer shows up on their side, but every search
+and grab against it fails.
+
+The container serves immediately on first start; definitions are fetched in the background
+the same way a bare-metal instance fetches them (see [Definitions](#definitions) above), so
+an instance that reports zero definitions in its first minute is behaving correctly, not
+failing. No image ships with definitions baked in — they are third-party and unlicensed, so
+they are fetched on the operator's own machine, on the operator's own machine's time, every
+time. For an air-gapped host, or one you want pinned to a definition set you already
+vetted, set `OXIDARR_DEFINITIONS_AUTO_UPDATE=false` in the compose file's `environment:`
+block and manage `/data/definitions` yourself.
+
+The compose file mounts a named volume, `oxidarr-data`, rather than a host directory,
+because the image only seeds `/data`'s ownership for a named volume — Docker copies the
+image directory's contents and ownership into it on first use. A bind mount such as
+`-v ./data:/data` keeps the host directory's existing ownership instead, so if you swap in
+one of those, `chown 10001:10001` that host directory first or the container will fail to
+write its database and definitions with `EACCES`.
+
 ## Web UI
 
 `oxidarr-ui` is a Dioxus web frontend over the same `/api/v1` surface `oxidarr-prowl`
