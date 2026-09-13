@@ -228,7 +228,7 @@ cargo feature, off by default: the plain `cargo build -p oxidarr-prowl` binary (
 features) from [Quick start](#quick-start) above is completely unaffected by any of this.
 
 **Building the bundle is a hard prerequisite of the `ui` feature, not an optional step.**
-`oxidarr-prowl`'s `ui` feature embeds `crates/oxidarr-ui/dist` into the binary at compile
+`oxidarr-prowl`'s `ui` feature embeds `crates/oxidarr-prowl/dist` into the binary at compile
 time (`include_dir!`); nothing in this repository creates that directory or ships a
 placeholder for it, so enabling the feature (`cargo build`/`check`/`test --features ui`)
 without building it first fails outright, at macro expansion, with a message that gives no
@@ -236,12 +236,12 @@ hint what to do about it:
 
 ```
 error: proc macro panicked
-  --> crates/oxidarr-prowl/src/ui.rs:88:29
+  --> crates/oxidarr-prowl/src/ui.rs:99:29
    |
-88 | static DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../oxidarr-ui/dist");
-   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+99 | static DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/dist");
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = help: message: ".../crates/oxidarr-ui/dist" is not a directory
+   = help: message: ".../crates/oxidarr-prowl/dist" is not a directory
 ```
 
 (`crates/oxidarr-prowl/build.rs` catches the same condition earlier, with a one-line panic
@@ -256,8 +256,11 @@ rustup target add wasm32-unknown-unknown
 ```
 
 That script runs `dx build --release` in `crates/oxidarr-ui` and copies the result into
-`crates/oxidarr-ui/dist` — dioxus-cli 0.7.10's `dx build` does not write there itself for
-a web build (see the script's own comment for exactly where it does write, and why).
+`crates/oxidarr-prowl/dist` — dioxus-cli 0.7.10's `dx build` does not write there itself for
+a web build (see the script's own comment for exactly where it does write, and why), and the
+bundle lives inside `oxidarr-prowl` rather than next to the frontend that produces it so
+`cargo package` can ship it inside the crate that actually embeds it (see that crate's
+`Cargo.toml`).
 
 > Deno also ships a binary called `dx`, and on a machine where its install directory
 > precedes `~/.cargo/bin` on `PATH` it wins the name. The script checks `dx --version` and

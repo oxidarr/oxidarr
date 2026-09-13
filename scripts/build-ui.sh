@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Builds the real oxidarr-ui web bundle and copies it into
-# crates/oxidarr-ui/dist — the directory crates/oxidarr-prowl/src/ui.rs's
-# `include_dir!` embeds at compile time behind the `ui` cargo feature.
+# crates/oxidarr-prowl/dist — the directory crates/oxidarr-prowl/src/ui.rs's
+# `include_dir!` embeds at compile time behind the `ui` cargo feature. It
+# lives inside oxidarr-prowl, not oxidarr-ui, so `cargo package` can ship it
+# with the crate that actually consumes it — a path outside the package
+# root (`../oxidarr-ui/dist`) can never be included in a published `.crate`,
+# and even if it could, a `cargo install`-extracted crate has no sibling
+# directory for it to live in.
 #
 # `dx build`'s own Dioxus.toml `out_dir` setting is not consulted for a web
 # build (verified against dioxus-cli 0.7.10's own source): it always writes
@@ -68,9 +73,9 @@ if [[ ! -f "$built/index.html" ]]; then
   exit 1
 fi
 
-rm -rf crates/oxidarr-ui/dist
-mkdir -p crates/oxidarr-ui/dist
-cp -R "$built"/. crates/oxidarr-ui/dist/
+rm -rf crates/oxidarr-prowl/dist
+mkdir -p crates/oxidarr-prowl/dist
+cp -R "$built"/. crates/oxidarr-prowl/dist/
 
 # dx only discovers (and content-hashes) assets reached through an `asset!()`
 # call in Rust; it does not parse `url()` references inside a stylesheet. The
@@ -78,6 +83,6 @@ cp -R "$built"/. crates/oxidarr-ui/dist/
 # them — they are copied here under their plain, unhashed filenames, which is
 # exactly what that stylesheet's `url("/assets/plex-*.woff2")` asks for.
 cp crates/oxidarr-ui/assets/plex-sans.woff2 crates/oxidarr-ui/assets/plex-mono.woff2 \
-  crates/oxidarr-ui/dist/assets/
+  crates/oxidarr-prowl/dist/assets/
 
-echo "wrote $(du -sh crates/oxidarr-ui/dist | cut -f1) to crates/oxidarr-ui/dist"
+echo "wrote $(du -sh crates/oxidarr-prowl/dist | cut -f1) to crates/oxidarr-prowl/dist"

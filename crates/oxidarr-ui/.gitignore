@@ -1,8 +1,0 @@
-# dx build output. The root .gitignore's `/dist` only anchors to the repo
-# root, not this crate subdir, so it never actually covered this directory
-# — this file closes that gap. Build it with `./scripts/build-ui.sh` (from
-# the repo root) — `crates/oxidarr-prowl`'s `ui` cargo feature requires
-# this directory to already exist and embeds it at compile time; see that
-# crate's `src/ui.rs` module docs and `build.rs`, and this repo's
-# README.md "Web UI" section.
-/dist
