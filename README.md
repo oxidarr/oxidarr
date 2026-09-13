@@ -13,8 +13,10 @@ mobile clients, dashboards — keeps working unchanged.
 > [End-to-end acceptance](#end-to-end-acceptance-sonarr) below. A Dioxus web
 > UI over that same `/api/v1` surface ships behind the `ui` cargo feature
 > (off by default) — see [Web UI](#web-ui) below; the default, API-only
-> binary is unchanged. There is no release-engineering yet (packaging,
-> Docker image, versioned releases).
+> binary is unchanged. Packaging exists in-repo — a `Dockerfile` and a
+> [Docker](#docker) compose file — but no image is published anywhere yet and there
+> are no versioned releases, so running the compose file today means building that
+> image yourself first.
 
 ## Why
 
