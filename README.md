@@ -51,8 +51,17 @@ indexers, and grab a release.
 
 Oxidarr executes [Prowlarr's Cardigann definitions](https://github.com/Prowlarr/Indexers)
 unmodified, targeting schema **v11** (the only version upstream currently supports).
-They are third-party and unlicensed, so they are never committed — fetch them with
-`scripts/fetch-definitions.sh <dest>` (default dest: `.definitions`).
+They are third-party and unlicensed, so they are never committed, and no released
+artefact — container image, `.crate`, release archive — contains them either.
+
+By default, `oxidarr-prowl` fetches and refreshes them itself at runtime: a fresh
+instance serves immediately while the first fetch runs in the background, and every
+`definitions_interval` afterwards it fetches again, replacing the installed set only
+once the new one is fully downloaded and extracted. Set
+`OXIDARR_DEFINITIONS_AUTO_UPDATE=false` to disable this and hand the `definitions/`
+directory back to yourself — in that case fetch it by hand with
+`scripts/fetch-definitions.sh <dest>` (default dest: `.definitions`), as shown in
+step 2 below.
 
 ## Quick start
 

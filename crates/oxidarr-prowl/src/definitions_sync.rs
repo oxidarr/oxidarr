@@ -252,6 +252,67 @@ fn stage(body: &[u8], staging: &Path) -> Result<usize, SyncError> {
     extract_definitions(body, staging)
 }
 
+/// Whether the updater should fetch immediately on startup rather than
+/// waiting out its first interval. A fresh install has nothing to serve, so
+/// it fetches at once; an install that already has definitions serves them
+/// straight away and refreshes on schedule.
+#[must_use]
+pub const fn should_sync_now(definitions_count: usize) -> bool {
+    definitions_count == 0
+}
+
+/// Spawns the background updater. Returns immediately — the caller goes on
+/// to serve requests while this runs.
+///
+/// The task never fails the process: every error is logged and the previous
+/// definitions stay in place. An instance whose first fetch has not finished
+/// (or has failed) serves normally, with search and `t=caps` degraded for
+/// Cardigann indexers only — the behaviour `main` already documents for a
+/// missing definitions directory.
+///
+/// # Concurrency
+///
+/// This must remain the *only* caller of [`sync_once`] for a given
+/// `data_dir`. Nothing in `sync_once` — nor [`install_definitions`] or
+/// [`stage`] beneath it — serialises concurrent callers against the same
+/// staging directory; two overlapping runs would race on
+/// `{data_dir}/definitions.staging`, and one run's cleanup or swap could
+/// land in the middle of the other's. Exactly one updater task exists
+/// today, so no such race exists yet. But a future manual "refresh now"
+/// trigger (deliberately deferred out of this milestone) would introduce a
+/// second caller, and whoever adds it must serialise the two against each
+/// other first — a mutex, a channel into this task, or similar — rather
+/// than call `sync_once` directly from a second place.
+pub fn spawn_updater(
+    client: reqwest::Client,
+    url: String,
+    data_dir: PathBuf,
+    interval: std::time::Duration,
+    store: crate::definitions::DefinitionStore,
+    sync_immediately: bool,
+) {
+    tokio::spawn(async move {
+        if !sync_immediately {
+            tokio::time::sleep(interval).await;
+        }
+        loop {
+            match sync_once(&client, &url, &data_dir).await {
+                Ok(count) => {
+                    eprintln!("definitions updated: {count} loaded");
+                    if let Err(err) = store.refresh().await {
+                        eprintln!("warning: refreshing the definition cache failed: {err}");
+                    }
+                }
+                Err(err) => {
+                    eprintln!("warning: updating definitions failed: {err}");
+                    eprintln!("         the previously installed definitions are still in use");
+                }
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -505,5 +566,16 @@ mod tests {
         .expect("sync_once hung — a timeout here means a regression, not a slow machine");
 
         assert!(!staging.exists(), "staging leaked after a failure");
+    }
+
+    #[test]
+    fn a_populated_directory_does_not_force_an_immediate_sync() {
+        assert!(!should_sync_now(548));
+    }
+
+    #[test]
+    fn an_empty_directory_forces_an_immediate_sync() {
+        // A fresh install must not wait a whole interval before it can search.
+        assert!(should_sync_now(0));
     }
 }
