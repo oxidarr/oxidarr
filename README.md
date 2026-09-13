@@ -13,10 +13,8 @@ mobile clients, dashboards — keeps working unchanged.
 > [End-to-end acceptance](#end-to-end-acceptance-sonarr) below. A Dioxus web
 > UI over that same `/api/v1` surface ships behind the `ui` cargo feature
 > (off by default) — see [Web UI](#web-ui) below; the default, API-only
-> binary is unchanged. Packaging exists in-repo — a `Dockerfile` and a
-> [Docker](#docker) compose file — but no image is published anywhere yet and there
-> are no versioned releases, so running the compose file today means building that
-> image yourself first.
+> binary is unchanged. See [Installation](#installation) below for the
+> three supported ways to run it.
 
 ## Why
 
@@ -64,6 +62,32 @@ once the new one is fully downloaded and extracted. Set
 directory back to yourself — in that case fetch it by hand with
 `scripts/fetch-definitions.sh <dest>` (default dest: `.definitions`), as shown in
 step 2 below.
+
+## Installation
+
+Three ways to get `oxidarr-prowl` running, in the order a newcomer should try them.
+All three fetch Cardigann definitions themselves at runtime — see
+[Definitions](#definitions) above — so none of them, nor the container image, ship
+any third-party indexer definitions.
+
+1. **Docker (recommended).** [`docs/docker-compose.yml`](docs/docker-compose.yml) is a
+   ready-to-use compose file pinned to a released image tag. See [Docker](#docker) below
+   for the exact commands and the environment variables worth setting before first start.
+
+2. **A prebuilt binary.** Download the archive for your platform from the
+   [releases page](https://github.com/oxidarr/oxidarr/releases), verify it against the
+   `.sha256` file next to it, and extract it — no Rust toolchain required. It contains
+   `oxidarr-prowl` (built with the `ui` feature, so the web UI is included) and
+   `oxidarr-migrate`.
+
+3. **`cargo install`,** for a Rust toolchain that is already set up:
+
+   ```sh
+   cargo install oxidarr-prowl --features ui
+   ```
+
+   The `ui` feature is what includes the web interface (see [Web UI](#web-ui) below);
+   omit it for an API-only install.
 
 ## Quick start
 
@@ -175,10 +199,6 @@ Cardigann definition to add, ports, the Sonarr image, ...).
 ## Docker
 
 ```sh
-# No image is published yet. Build it locally first, under the exact tag
-# the compose file pins:
-docker build -t ghcr.io/oxidarr/oxidarr-prowl:0.1.0 .
-
 docker compose -p oxidarr -f docs/docker-compose.yml up -d
 docker compose -p oxidarr -f docs/docker-compose.yml logs | grep 'api key'
 ```
