@@ -111,6 +111,56 @@ fn definition_file_name(path: &Path) -> Option<String> {
     Some(rest.to_string())
 }
 
+/// Moves `staging` into place as `live`, replacing whatever was there.
+///
+/// `staging` must be a sibling of `live` — the same filesystem — because
+/// the swap relies on `rename`, which is atomic only within a filesystem.
+/// A crash at any point leaves either the old complete set or the new
+/// complete set in place, never a half-extracted mixture.
+///
+/// The old directory is moved aside first and deleted after the swap,
+/// rather than deleted before it, so the window in which `live` does not
+/// exist is a single `rename` rather than the length of a recursive delete.
+///
+/// # Errors
+///
+/// [`SyncError::Io`] if any of the renames or the cleanup delete fails.
+pub fn install_definitions(staging: &Path, live: &Path) -> Result<(), SyncError> {
+    let previous = with_suffix(live, ".previous");
+
+    if live.exists() {
+        std::fs::rename(live, &previous).map_err(|source| SyncError::Io {
+            action: "moving the previous definitions aside",
+            path: live.to_path_buf(),
+            source,
+        })?;
+    }
+
+    std::fs::rename(staging, live).map_err(|source| SyncError::Io {
+        action: "installing the new definitions",
+        path: live.to_path_buf(),
+        source,
+    })?;
+
+    if previous.exists() {
+        std::fs::remove_dir_all(&previous).map_err(|source| SyncError::Io {
+            action: "removing the previous definitions",
+            path: previous,
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+/// `path` with `suffix` appended to its final component — used to name the
+/// staging and previous directories as siblings of the live one, keeping
+/// every rename within a single filesystem.
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -175,5 +225,57 @@ mod tests {
             extract_definitions(&empty, dir.path()),
             Err(SyncError::NoDefinitions)
         ));
+    }
+
+    #[test]
+    fn installing_replaces_an_existing_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let live = root.path().join("definitions");
+        std::fs::create_dir(&live).unwrap();
+        std::fs::write(live.join("stale.yml"), "id: stale\n").unwrap();
+
+        let staging = root.path().join("definitions.staging");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("alpha.yml"), "id: alpha\n").unwrap();
+
+        install_definitions(&staging, &live).unwrap();
+
+        assert!(live.join("alpha.yml").is_file());
+        assert!(!live.join("stale.yml").exists(), "the old set survived");
+        assert!(!staging.exists(), "staging was left behind");
+    }
+
+    #[test]
+    fn installing_works_when_nothing_is_there_yet() {
+        let root = tempfile::tempdir().unwrap();
+        let live = root.path().join("definitions");
+        let staging = root.path().join("definitions.staging");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("alpha.yml"), "id: alpha\n").unwrap();
+
+        install_definitions(&staging, &live).unwrap();
+
+        assert!(live.join("alpha.yml").is_file());
+    }
+
+    #[test]
+    fn installing_leaves_no_backup_directory_behind() {
+        // A leftover definitions.previous would be read by nothing and would
+        // double the disk cost of every update.
+        let root = tempfile::tempdir().unwrap();
+        let live = root.path().join("definitions");
+        std::fs::create_dir(&live).unwrap();
+        std::fs::write(live.join("stale.yml"), "id: stale\n").unwrap();
+        let staging = root.path().join("definitions.staging");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("alpha.yml"), "id: alpha\n").unwrap();
+
+        install_definitions(&staging, &live).unwrap();
+
+        let leftovers: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers, vec![std::ffi::OsString::from("definitions")]);
     }
 }
