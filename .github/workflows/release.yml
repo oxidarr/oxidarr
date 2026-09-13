@@ -88,7 +88,18 @@ jobs:
           cp README.md LICENSE "dist/${name}/"
           cd dist
           if [ "${{ matrix.archive }}" = "zip" ]; then
-            7z a "${name}.zip" "${name}"
+            # 7z is present on the Windows runner image today, but it has
+            # gone missing from this exact image before
+            # (actions/runner-images#9361), and this is the one leg we cannot
+            # cheaply dry-run. Compress-Archive ships with PowerShell on every
+            # Windows runner, so fall back to it rather than depending on an
+            # image detail that has flipped once already.
+            if command -v 7z >/dev/null 2>&1; then
+              7z a "${name}.zip" "${name}"
+            else
+              powershell -NoProfile -Command \
+                "Compress-Archive -Path '${name}' -DestinationPath '${name}.zip'"
+            fi
           else
             tar czf "${name}.tar.gz" "${name}"
           fi
