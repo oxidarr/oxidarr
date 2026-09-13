@@ -78,8 +78,14 @@ jobs:
           for _ in $(seq 30); do curl -fsS http://127.0.0.1:9696/ping && break; sleep 1; done
           curl -fsS http://127.0.0.1:9696/ping
           test "$(docker exec verify id -u)" = 10001
-          ! docker run --rm oxidarr-prowl:ci test -d /data/definitions
-          test "$(docker history --no-trunc oxidarr-prowl:ci | grep -ci definitions)" = 0
+          if docker run --rm --entrypoint test oxidarr-prowl:ci -d /data/definitions; then
+            echo "FAIL: /data/definitions exists in the image — definitions must never be baked into a layer" >&2
+            exit 1
+          fi
+          if docker history --no-trunc oxidarr-prowl:ci | grep -qi definitions; then
+            echo "FAIL: docker history mentions 'definitions' — some layer must have baked in the third-party definitions" >&2
+            exit 1
+          fi
           docker rm -f verify
 
       # Digest-only output: with two legs building the same tags, whichever
