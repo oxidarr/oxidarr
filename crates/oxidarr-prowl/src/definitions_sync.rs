@@ -438,14 +438,26 @@ mod tests {
         );
     }
 
+    /// How long a test will wait for `sync_once` before treating it as
+    /// hung rather than slow. A loopback transfer of a fixture this small
+    /// finishes in milliseconds, so this never fires spuriously — it only
+    /// turns a future regression that makes `download` await forever into
+    /// a fast, legible test failure instead of a CI job that burns its
+    /// time limit and reports nothing useful.
+    const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
     #[tokio::test]
     async fn a_successful_sync_installs_the_definitions() {
         let root = tempfile::tempdir().unwrap();
         let url = serve_once(SAMPLE, 200).await;
 
-        let count = sync_once(&reqwest::Client::new(), &url, root.path())
-            .await
-            .unwrap();
+        let count = tokio::time::timeout(
+            SYNC_TIMEOUT,
+            sync_once(&reqwest::Client::new(), &url, root.path()),
+        )
+        .await
+        .expect("sync_once hung — a timeout here means a regression, not a slow machine")
+        .unwrap();
 
         assert_eq!(count, 2);
         assert!(root.path().join("definitions/alpha.yml").is_file());
@@ -459,7 +471,12 @@ mod tests {
         std::fs::write(live.join("keep.yml"), "id: keep\n").unwrap();
 
         let url = serve_once(b"", 500).await;
-        let result = sync_once(&reqwest::Client::new(), &url, root.path()).await;
+        let result = tokio::time::timeout(
+            SYNC_TIMEOUT,
+            sync_once(&reqwest::Client::new(), &url, root.path()),
+        )
+        .await
+        .expect("sync_once hung — a timeout here means a regression, not a slow machine");
 
         assert!(result.is_err());
         assert!(
@@ -471,8 +488,8 @@ mod tests {
     #[tokio::test]
     async fn a_failed_sync_leaves_no_staging_directory_behind() {
         // Also plants a leftover staging directory from a hypothetical
-        // earlier crashed run, so this proves the failure path cleans up
-        // for real rather than merely never having created anything.
+        // earlier crashed run, so this exercises stage's clear-an-existing-
+        // leftover branch at the sync_once level too.
         let root = tempfile::tempdir().unwrap();
         let staging = root.path().join("definitions.staging");
         std::fs::create_dir(&staging).unwrap();
@@ -480,7 +497,12 @@ mod tests {
 
         let url = serve_once(b"not a gzip stream", 200).await;
 
-        let _ = sync_once(&reqwest::Client::new(), &url, root.path()).await;
+        let _ = tokio::time::timeout(
+            SYNC_TIMEOUT,
+            sync_once(&reqwest::Client::new(), &url, root.path()),
+        )
+        .await
+        .expect("sync_once hung — a timeout here means a regression, not a slow machine");
 
         assert!(!staging.exists(), "staging leaked after a failure");
     }
