@@ -229,7 +229,7 @@ async fn run(config: Config) -> Result<(), String> {
     print_startup_banner(&config, definitions_count, &api_key);
 
     let definitions_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(std::time::Duration::from_mins(5))
         .build()
         .map_err(|err| format!("building the definitions HTTP client: {err}"))?;
 
