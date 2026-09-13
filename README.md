@@ -13,8 +13,10 @@ mobile clients, dashboards — keeps working unchanged.
 > [End-to-end acceptance](#end-to-end-acceptance-sonarr) below. A Dioxus web
 > UI over that same `/api/v1` surface ships behind the `ui` cargo feature
 > (off by default) — see [Web UI](#web-ui) below; the default, API-only
-> binary is unchanged. There is no release-engineering yet (packaging,
-> Docker image, versioned releases).
+> binary is unchanged. Packaging exists in-repo — a `Dockerfile` and a
+> [Docker](#docker) compose file — but no image is published anywhere yet and there
+> are no versioned releases, so running the compose file today means building that
+> image yourself first.
 
 ## Why
 
@@ -169,6 +171,52 @@ It needs a working `docker` and network access, and is **not** run in CI:
 
 Run `./scripts/e2e-sonarr.sh --help` for every environment variable it reads (which
 Cardigann definition to add, ports, the Sonarr image, ...).
+
+## Docker
+
+```sh
+# No image is published yet. Build it locally first, under the exact tag
+# the compose file pins:
+docker build -t ghcr.io/oxidarr/oxidarr-prowl:0.1.0 .
+
+docker compose -p oxidarr -f docs/docker-compose.yml up -d
+docker compose -p oxidarr -f docs/docker-compose.yml logs | grep 'api key'
+```
+
+That compose file (`docs/docker-compose.yml`) is the recommended way to run `oxidarr-prowl`;
+the startup banner's instance API key is the only place it is surfaced, and the `grep` above
+is the fastest way to it. The image is pinned to a specific tag rather than `latest`, so an
+unattended `docker compose pull` cannot hand you a different major version overnight.
+
+Set `OXIDARR_EXTERNAL_URL` to the address other machines reach this container on before you
+start it. It is written verbatim into every indexer Oxidarr syncs into Sonarr or Radarr, so
+if it is left at its container-internal default, every one of those syncs hands Sonarr and
+Radarr a `baseUrl` they cannot reach — the indexer shows up on their side, but every search
+and grab against it fails.
+
+The container serves immediately on first start; definitions are fetched in the background
+the same way a bare-metal instance fetches them (see [Definitions](#definitions) above), so
+an instance that reports zero definitions in its first minute is behaving correctly, not
+failing. No image ships with definitions baked in — they are third-party and unlicensed, so
+they are fetched on the operator's own machine, on the operator's own machine's time, every
+time. For an air-gapped host, or one you want pinned to a definition set you already
+vetted, set `OXIDARR_DEFINITIONS_AUTO_UPDATE=false` in the compose file's `environment:`
+block and manage `/data/definitions` yourself.
+
+Populating it yourself means something different in a container than on bare metal: the
+startup notice's instructions to run `scripts/fetch-definitions.sh` and see "Quick start
+step 2" assume a source checkout, and neither the script nor the rest of the repo exists
+inside the image, which holds only the two compiled binaries. Instead, put a flat set of
+`*.yml` files directly into the named volume's `definitions/` directory yourself — for
+example `docker cp` them in before or after first start, or prepare a bind mount ahead of
+time — mindful of the ownership note below.
+
+The compose file mounts a named volume, `oxidarr-data`, rather than a host directory,
+because the image only seeds `/data`'s ownership for a named volume — Docker copies the
+image directory's contents and ownership into it on first use. A bind mount such as
+`-v ./data:/data` keeps the host directory's existing ownership instead, so if you swap in
+one of those, `chown 10001:10001` that host directory first or the container will fail to
+write its database and definitions with `EACCES`.
 
 ## Web UI
 

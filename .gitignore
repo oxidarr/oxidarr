@@ -17,4 +17,9 @@
 # third-party indexer definitions, fetched not vendored
 /.definitions/
 
+# same reason: DEFAULT_DATA_DIR is ./data, and auto-update defaults to on,
+# so `cargo run -p oxidarr-prowl` from the repo root fills data/definitions/
+# with the same unlicensed, third-party .yml files
+/data/
+
 .DS_Store

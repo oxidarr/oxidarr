@@ -40,11 +40,16 @@
 //! [`ui`] (behind the `ui` cargo feature, off by default) embeds and serves
 //! the `oxidarr-ui` web bundle; see that module's own docs for how and why
 //! it can never shadow the [`api`]/[`torznab`] routes above.
+//!
+//! [`health`] is a single unauthenticated `GET /ping`, merged into
+//! [`server::app`] beside (not inside) the auth-wrapped `/api/v1` router so
+//! the container's own credential-less `HEALTHCHECK` can reach it.
 
 pub mod api;
 pub mod config;
 pub mod definitions;
 pub mod definitions_sync;
+pub mod health;
 pub mod server;
 pub mod sync;
 pub mod torznab;

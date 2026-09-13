@@ -212,12 +212,18 @@ where
 /// /{indexer_id}/api`, above) merged with the auth-wrapped `/api/v1` router
 /// ([`crate::api::api_router`]) — see that module's own docs for the
 /// deliberate asymmetry in how each side reads the instance API key —
-/// and, when the `ui` cargo feature is enabled, [`crate::ui::router`]'s web
-/// UI fallback merged in last. Last matters: [`crate::ui::router`] carries
-/// only a fallback handler, so merging it after the two routers above
-/// (which carry real named routes, no fallback of their own) can never
-/// shadow `/api/v1/*` or `/{indexer_id}/api` — see that module's own docs
-/// for the `axum::Router::merge` semantics this relies on, and
+/// and [`crate::health::router`]'s unauthenticated `GET /ping`, merged in
+/// beside those two rather than inside either. That placement is
+/// deliberate: the `/api/v1` auth layer wraps only `api_router`'s own
+/// router, so `/ping` — merged as a sibling, not nested inside it — never
+/// passes through that layer, which is what lets the container's own
+/// credential-less `HEALTHCHECK` reach it. Then, when the `ui` cargo
+/// feature is enabled, [`crate::ui::router`]'s web UI fallback is merged
+/// in last. Last matters: [`crate::ui::router`] carries only a fallback
+/// handler, so merging it after the routers above (which carry real named
+/// routes, no fallback of their own) can never shadow `/api/v1/*`,
+/// `/{indexer_id}/api`, or `/ping` — see that module's own docs for the
+/// `axum::Router::merge` semantics this relies on, and
 /// `tests/ui_router.rs` for where that precedence is pinned.
 ///
 /// Reads [`ConfigRepo::api_key`] once, at call time, to build the
@@ -237,7 +243,7 @@ where
 {
     let key = ConfigRepo::new(&state.db).api_key().await?;
     let v1 = api_router(state.clone(), ApiKey::new(key), Utc::now());
-    let app = router(state).merge(v1);
+    let app = router(state).merge(v1).merge(crate::health::router());
     #[cfg(feature = "ui")]
     let app = app.merge(crate::ui::router());
     Ok(app)

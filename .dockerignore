@@ -1,0 +1,13 @@
+target/
+.definitions/
+
+# The builder stage runs scripts/build-ui.sh to produce this directory
+# itself. Do NOT remove this exclusion: copying in a developer's local
+# bundle would make the image's UI contents depend on whoever ran the
+# build, rather than on what the builder stage actually compiled.
+crates/oxidarr-ui/dist/
+
+.git/
+.local/
+.superpowers/
+data/

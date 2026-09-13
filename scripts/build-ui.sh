@@ -17,9 +17,20 @@ cd "$(dirname "$0")/.."
 # baffling "Unable to choose binary for build" from a tool that has nothing
 # to do with Dioxus. Resolve an actual dioxus-cli instead of trusting the
 # name. Override with DX=/path/to/dx if yours lives somewhere else.
+#
+# The candidate list also has to work where CARGO_HOME differs from
+# $HOME/.cargo — the official rust:*-bookworm image is what proved this:
+# there HOME=/root but CARGO_HOME=/usr/local/cargo, so `cargo install
+# dioxus-cli` puts dx at /usr/local/cargo/bin/dx, which neither the
+# $HOME/.cargo/bin guess nor a broken PATH search would find. Do not
+# simplify this list back down to just the $HOME guess.
 find_dx() {
   local candidate
-  for candidate in "${DX:-}" "$HOME/.cargo/bin/dx" $(command -v -a dx 2>/dev/null); do
+  for candidate in \
+    "${DX:-}" \
+    "${CARGO_HOME:-$HOME/.cargo}/bin/dx" \
+    "$HOME/.cargo/bin/dx" \
+    $(type -aP dx 2>/dev/null || true); do
     [[ -n "$candidate" && -x "$candidate" ]] || continue
     if "$candidate" --version 2>/dev/null | grep -qi '^dioxus'; then
       printf '%s' "$candidate"

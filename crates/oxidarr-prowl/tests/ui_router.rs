@@ -126,6 +126,20 @@ async fn an_unimplemented_api_v1_path_is_not_found_not_the_spa_shell() {
     );
 }
 
+/// `/ping` is a named route and the UI router carries only a fallback, so
+/// merging the UI last cannot capture it. Pinned because a healthcheck
+/// silently receiving the SPA shell would report a broken instance
+/// healthy — every dashboard, `docker ps`, and `depends_on` gate
+/// downstream would believe it.
+#[tokio::test]
+async fn the_ui_fallback_does_not_shadow_ping() {
+    let router = app(state(seeded_db().await)).await.unwrap();
+    let response = router.oneshot(get("/ping")).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_text(response).await, r#"{"status":"OK"}"#);
+}
+
 /// Proves the *production* embed (`crate::ui::router`, backed by the real
 /// `DIST`) actually serves the real app shell. There is no stub anywhere
 /// in this repository for `crates/oxidarr-ui/dist` — this whole test file
