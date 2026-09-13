@@ -143,6 +143,14 @@ jobs:
         # catch it, by looking inside the packaged crate.
         run: |
           set -euo pipefail
+          # Swatinem/rust-cache can restore a stale oxidarr-prowl-*.crate
+          # into target/package/ alongside the one packaged below — most
+          # likely the moment the version bumps off 0.0.0 (Task 5, the
+          # release itself). With two files matching, `ls` below returns a
+          # multi-line string and `tar tzf "$crate"` fails on the embedded
+          # newline instead of on anything to do with dist/. Deleting any
+          # stale artefact first guarantees exactly one file can match.
+          rm -f target/package/oxidarr-prowl-*.crate
           cargo package -p oxidarr-prowl --allow-dirty --no-verify
           crate=$(ls target/package/oxidarr-prowl-*.crate)
           if [ "$(tar tzf "$crate" | grep -c '/dist/')" -eq 0 ]; then
