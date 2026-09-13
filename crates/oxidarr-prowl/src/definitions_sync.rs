@@ -225,10 +225,13 @@ async fn download(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, SyncEr
             url: url.to_string(),
             source,
         })?;
-    let bytes = response.bytes().await.map_err(|source| SyncError::Download {
-        url: url.to_string(),
-        source,
-    })?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|source| SyncError::Download {
+            url: url.to_string(),
+            source,
+        })?;
     Ok(bytes.to_vec())
 }
 
