@@ -85,4 +85,12 @@ cp -R "$built"/. crates/oxidarr-prowl/dist/
 cp crates/oxidarr-ui/assets/plex-sans.woff2 crates/oxidarr-ui/assets/plex-mono.woff2 \
   crates/oxidarr-prowl/dist/assets/
 
+# Those two fonts reach every published artefact (the four release binaries
+# via include_dir!, the container image, and the oxidarr-prowl .crate on
+# crates.io) — but crates/oxidarr-ui/assets/PLEX-LICENSE.txt otherwise only
+# ever ships inside oxidarr-ui's own crate, never one of theirs. OFL 1.1 §2
+# requires the copyright notice and licence text to accompany every
+# redistributed copy, so it travels alongside the fonts here too.
+cp crates/oxidarr-ui/assets/PLEX-LICENSE.txt crates/oxidarr-prowl/dist/assets/
+
 echo "wrote $(du -sh crates/oxidarr-prowl/dist | cut -f1) to crates/oxidarr-prowl/dist"

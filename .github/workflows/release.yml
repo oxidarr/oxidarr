@@ -85,7 +85,7 @@ jobs:
               cp "${bindir}/${bin}" "dist/${name}/"
             fi
           done
-          cp README.md LICENSE "dist/${name}/"
+          cp README.md LICENSE crates/oxidarr-ui/assets/PLEX-LICENSE.txt "dist/${name}/"
           cd dist
           if [ "${{ matrix.archive }}" = "zip" ]; then
             # 7z is present on the Windows runner image today, but it has
