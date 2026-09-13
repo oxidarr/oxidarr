@@ -128,10 +128,22 @@ fn definition_file_name(path: &Path) -> Option<String> {
 pub fn install_definitions(staging: &Path, live: &Path) -> Result<(), SyncError> {
     let previous = with_suffix(live, ".previous");
 
+    // A previous run may have died after the swap but before its cleanup,
+    // stranding this directory. `rename` fails with ENOTEMPTY against a
+    // non-empty destination, so without this every later run would fail at
+    // the move-aside below and definitions could never update again.
+    if previous.exists() {
+        std::fs::remove_dir_all(&previous).map_err(|source| SyncError::Io {
+            action: "clearing a stranded previous definitions directory",
+            path: previous.clone(),
+            source,
+        })?;
+    }
+
     if live.exists() {
         std::fs::rename(live, &previous).map_err(|source| SyncError::Io {
             action: "moving the previous definitions aside",
-            path: live.to_path_buf(),
+            path: previous.clone(),
             source,
         })?;
     }
@@ -155,6 +167,10 @@ pub fn install_definitions(staging: &Path, live: &Path) -> Result<(), SyncError>
 /// `path` with `suffix` appended to its final component — used to name the
 /// staging and previous directories as siblings of the live one, keeping
 /// every rename within a single filesystem.
+///
+/// `path` must not have a trailing separator, or the suffix would be appended
+/// to the path string as a child rather than a sibling, silently breaking the
+/// same-filesystem atomicity that `install_definitions` depends on.
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
@@ -277,5 +293,30 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(leftovers, vec![std::ffi::OsString::from("definitions")]);
+    }
+
+    #[test]
+    fn installing_recovers_from_a_stranded_previous_directory() {
+        // A prior run died after its swap but before its cleanup. Without
+        // recovery, rename(live -> previous) fails with ENOTEMPTY and the
+        // definitions can never be updated again.
+        let root = tempfile::tempdir().unwrap();
+        let live = root.path().join("definitions");
+        std::fs::create_dir(&live).unwrap();
+        std::fs::write(live.join("current.yml"), "id: current\n").unwrap();
+
+        let stranded = root.path().join("definitions.previous");
+        std::fs::create_dir(&stranded).unwrap();
+        std::fs::write(stranded.join("ancient.yml"), "id: ancient\n").unwrap();
+
+        let staging = root.path().join("definitions.staging");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("fresh.yml"), "id: fresh\n").unwrap();
+
+        install_definitions(&staging, &live).unwrap();
+
+        assert!(live.join("fresh.yml").is_file());
+        assert!(!live.join("current.yml").exists());
+        assert!(!stranded.exists(), "the stranded directory survived");
     }
 }
