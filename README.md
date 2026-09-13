@@ -71,7 +71,8 @@ step 2 below.
    cargo build -p oxidarr-prowl
    ```
 
-2. Fetch the Cardigann definitions. `scripts/fetch-definitions.sh <dest>` writes
+2. **Only if you set `OXIDARR_DEFINITIONS_AUTO_UPDATE=false`** (see the table in step 3):
+   fetch the Cardigann definitions yourself. `scripts/fetch-definitions.sh <dest>` writes
    `<dest>/v11/*.yml`, but `oxidarr-prowl` reads a *flat* `{data_dir}/definitions/*.yml`
    directory (see `crates/oxidarr-prowl/src/definitions.rs`) — one directory level up
    from where the fetch script writes. Point `definitions` at the fetched `v11`
@@ -82,6 +83,12 @@ step 2 below.
    mkdir -p data
    ln -s "$(pwd)/.definitions/v11" data/definitions
    ```
+
+   Leave auto-update at its default (`true`) and skip this step entirely: the server
+   fetches definitions itself in the background and owns `{data_dir}/definitions`
+   outright, replacing whatever it finds there on its first run — a hand-made symlink
+   included, silently, with nothing logged about it. Only do the above by hand when
+   auto-update is disabled.
 
 3. Run it. The database (`oxidarr.db`, migrated automatically on open — `oxidarr-migrate`
    is only needed if you want to apply/inspect migrations without starting the server)

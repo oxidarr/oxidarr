@@ -8,6 +8,13 @@
 //! [`definitions`] caches parsed Cardigann definitions, read-through, behind
 //! [`DefinitionStore`].
 //!
+//! [`definitions_sync`] fetches and refreshes the third-party Cardigann
+//! definition corpus [`definitions`] reads, at runtime and in the
+//! background: it downloads the archive, extracts it into a staging
+//! directory, and swaps it into place with an atomic `rename` — see its own
+//! module docs for why the definitions are never committed and how that
+//! swap is made safe against a crash mid-update.
+//!
 //! [`server`] wires that rendering, plus [`oxidarr_db`], [`oxidarr_indexer`],
 //! and [`DefinitionStore`], into the actual `GET /{indexer_id}/api` Torznab
 //! endpoint — see its module docs for authentication and error-code

@@ -16,9 +16,9 @@
 //! | `bind` | `OXIDARR_BIND` | `"0.0.0.0:9696"` | Prowlarr's own default port |
 //! | `data_dir` | `OXIDARR_DATA_DIR` | `"./data"` | holds `oxidarr.db` and the `definitions/` directory |
 //! | `external_url` | `OXIDARR_EXTERNAL_URL` | `http://{bind}` | see below |
-//! | `proxy` | `OXIDARR_PROXY` | none | tracker traffic only — see `oxidarr_indexer::ReqwestClient::with_proxy` |
+//! | `proxy` | `OXIDARR_PROXY` | none | tracker traffic only — see `oxidarr_indexer::ReqwestClient::with_proxy`; definition fetches always go direct and never route through this |
 //! | `log` | `OXIDARR_LOG` | `"info"` | accepted but unused until a tracing pass wires it up |
-//! | `definitions_auto_update` | `OXIDARR_DEFINITIONS_AUTO_UPDATE` | `true` | set `false` to manage `definitions/` yourself |
+//! | `definitions_auto_update` | `OXIDARR_DEFINITIONS_AUTO_UPDATE` | `true` | set `false` to manage `definitions/` yourself; accepts `true`/`false`/`1`/`0`/`yes`/`no`/`on`/`off`, case-insensitively |
 //! | `definitions_interval` | `OXIDARR_DEFINITIONS_INTERVAL` | `86400` | seconds; must be greater than zero |
 //! | `definitions_url` | `OXIDARR_DEFINITIONS_URL` | Prowlarr Indexers master tarball | override for a mirror or pinned snapshot |
 //!
@@ -70,7 +70,10 @@ pub struct Config {
     pub external_url: Url,
     /// An optional proxy URL (`http://`/`https://`/`socks5://`/`socks5h://`)
     /// applied to tracker-bound traffic only — see
-    /// `oxidarr_indexer::ReqwestClient::with_proxy`.
+    /// `oxidarr_indexer::ReqwestClient::with_proxy`. Definition-fetch traffic
+    /// (`definitions_sync`) is a third traffic class and always goes direct;
+    /// an operator running behind this proxy specifically to reach GitHub
+    /// should know it is not routed there.
     pub proxy: Option<String>,
     /// A log-level string, accepted for forward compatibility but not yet
     /// consumed by anything — no tracing subscriber is wired up in this
@@ -146,6 +149,33 @@ pub enum ConfigError {
         #[source]
         source: std::num::ParseIntError,
     },
+    /// `OXIDARR_DEFINITIONS_AUTO_UPDATE` was set to something not recognised
+    /// by [`parse_bool_flag`]. This is the air-gapped escape hatch — the one
+    /// control deciding whether the process makes any network request at
+    /// all — so an unrecognised spelling is rejected outright rather than
+    /// silently resolving to "enabled".
+    #[error(
+        "invalid definitions_auto_update {value:?}: expected one of \
+         true/false/1/0/yes/no/on/off"
+    )]
+    DefinitionsAutoUpdateParse {
+        /// The value that failed to parse.
+        value: String,
+    },
+}
+
+/// Parses a boolean flag from a config-file or environment-variable string,
+/// accepting the common human spellings case-insensitively: `true`/`false`,
+/// `1`/`0`, `yes`/`no`, `on`/`off`. Returns `None` for anything else so the
+/// caller can raise a precise, named error rather than guessing at intent —
+/// see [`ConfigError::DefinitionsAutoUpdateParse`], the one field that uses
+/// this today.
+fn parse_bool_flag(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 /// The TOML file's own shape: every field optional, since any of them may
@@ -223,10 +253,13 @@ pub fn load_config(
         .or(file.log)
         .unwrap_or_else(|| DEFAULT_LOG.to_string());
 
-    let definitions_auto_update = env("OXIDARR_DEFINITIONS_AUTO_UPDATE")
-        .map(|value| value != "false")
-        .or(file.definitions_auto_update)
-        .unwrap_or(true);
+    let definitions_auto_update = match env("OXIDARR_DEFINITIONS_AUTO_UPDATE") {
+        Some(value) => match parse_bool_flag(&value) {
+            Some(parsed) => parsed,
+            None => return Err(ConfigError::DefinitionsAutoUpdateParse { value }),
+        },
+        None => file.definitions_auto_update.unwrap_or(true),
+    };
 
     let definitions_interval = match env("OXIDARR_DEFINITIONS_INTERVAL") {
         Some(value) => value
@@ -481,6 +514,41 @@ mod tests {
         })
         .expect("env override loads");
         assert!(!config.definitions_auto_update);
+    }
+
+    #[test]
+    fn definitions_auto_update_accepts_a_falsy_spelling_other_than_false() {
+        // `0` is the likeliest spelling an operator reaches for in a compose
+        // file's environment block; it must disable auto-update exactly
+        // like the literal string "false" does.
+        let config = load_config(None, &|key| {
+            (key == "OXIDARR_DEFINITIONS_AUTO_UPDATE").then(|| "0".to_string())
+        })
+        .expect("a recognised falsy spelling must parse");
+        assert!(!config.definitions_auto_update);
+    }
+
+    #[test]
+    fn definitions_auto_update_accepts_a_truthy_spelling_other_than_true() {
+        let config = load_config(None, &|key| {
+            (key == "OXIDARR_DEFINITIONS_AUTO_UPDATE").then(|| "ON".to_string())
+        })
+        .expect("a recognised truthy spelling must parse, case-insensitively");
+        assert!(config.definitions_auto_update);
+    }
+
+    #[test]
+    fn an_unrecognised_definitions_auto_update_value_is_rejected() {
+        let result = load_config(None, &|key| {
+            (key == "OXIDARR_DEFINITIONS_AUTO_UPDATE").then(|| "maybe".to_string())
+        });
+        assert!(
+            matches!(
+                result,
+                Err(ConfigError::DefinitionsAutoUpdateParse { ref value }) if value == "maybe"
+            ),
+            "result was: {result:?}"
+        );
     }
 
     #[test]

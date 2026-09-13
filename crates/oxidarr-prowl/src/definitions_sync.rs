@@ -7,8 +7,9 @@
 //! fetched them by hand with `scripts/fetch-definitions.sh`.
 //!
 //! Every function here takes its inputs explicitly (bytes, paths, a URL) so
-//! the module is testable without a network. The background updater added
-//! later in this module is the only part that talks to the outside world.
+//! the module is testable without a network. [`sync_once`] (by way of the
+//! private `download`) is the only part that actually talks to the outside
+//! world; `spawn_updater` merely schedules calls to it on an interval.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -94,8 +95,22 @@ pub fn extract_definitions(archive: &[u8], dest: &Path) -> Result<usize, SyncErr
 
 /// The flat `<id>.yml` name for an archive entry under `definitions/v11`,
 /// or `None` for anything else — another schema version, a README, a
-/// directory entry. Matches on the marker rather than a fixed top-level
-/// directory because the archive's root is named after the branch.
+/// directory entry, or a hostile entry trying to escape `dest` once this
+/// name is joined onto it in [`extract_definitions`]. Matches on the marker
+/// rather than a fixed top-level directory because the archive's root is
+/// named after the branch.
+///
+/// `rest` (everything after the marker) must be *exactly one* normal path
+/// component: not empty, not `.` or `..`, and not `/`-nested. `\` is
+/// rejected outright rather than left to [`Component`](std::path::Component)
+/// parsing, because on a Unix build — including the one running this
+/// module's own tests — `Path` never treats `\` as a separator, so
+/// `definitions/v11/..\..\evil.yml` would otherwise sail through this check
+/// as one harmless-looking component while still escaping `dest` on a
+/// Windows deployment, where `\` *is* a separator and `dest.join` would
+/// honour it. Tar entries always use `/`, so this remainder came from
+/// `definitions_url` pointing at a hostile mirror, never from the pinned
+/// default.
 #[allow(
     clippy::case_sensitive_file_extension_comparisons,
     reason = "case sensitivity is intended: DefinitionStore resolves each definition as \
@@ -105,18 +120,34 @@ pub fn extract_definitions(archive: &[u8], dest: &Path) -> Result<usize, SyncErr
 fn definition_file_name(path: &Path) -> Option<String> {
     let text = path.to_str()?;
     let rest = text.split_once(V11_MARKER)?.1;
-    if rest.is_empty() || rest.contains('/') || !rest.ends_with(".yml") {
+    if rest.is_empty() || !rest.ends_with(".yml") || rest.contains('\\') {
         return None;
     }
-    Some(rest.to_string())
+
+    let mut components = Path::new(rest).components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(component)), None)
+            if component.to_str() == Some(rest) =>
+        {
+            Some(rest.to_string())
+        }
+        _ => None,
+    }
 }
 
 /// Moves `staging` into place as `live`, replacing whatever was there.
 ///
 /// `staging` must be a sibling of `live` — the same filesystem — because
 /// the swap relies on `rename`, which is atomic only within a filesystem.
-/// A crash at any point leaves either the old complete set or the new
-/// complete set in place, never a half-extracted mixture.
+/// A crash at any point never leaves a *partially extracted* directory at
+/// `live`: every file `stage` wrote is either fully installed or `live`
+/// still holds exactly the set that predated this call. There is one
+/// window this does not cover — if the process dies after the first
+/// rename (moving `live` aside to `previous`) but before the second (moving
+/// `staging` into `live`), `live` is briefly absent altogether, neither the
+/// old set nor the new one. That window self-heals on the next successful
+/// run: `install_definitions` only moves `live` aside `if live.exists()`,
+/// so a missing `live` simply skips straight to installing `staging`.
 ///
 /// The old directory is moved aside first and deleted after the swap,
 /// rather than deleted before it, so the window in which `live` does not
@@ -177,6 +208,17 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// The `{data_dir}/definitions` path — the one directory both `main`
+/// (counting and loading already-installed definitions) and [`sync_once`]
+/// (the swap target it installs into) must agree on. Extracted into one
+/// function so there is exactly one place that spells this join, rather
+/// than two independently-computed paths that happen to match today but
+/// could silently drift apart tomorrow.
+#[must_use]
+pub fn definitions_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("definitions")
+}
+
 /// Downloads `url`, extracts it into a staging directory beside
 /// `{data_dir}/definitions`, and installs it atomically. Returns how many
 /// definitions were installed.
@@ -197,7 +239,7 @@ pub async fn sync_once(
 ) -> Result<usize, SyncError> {
     let body = download(client, url).await?;
 
-    let live = data_dir.join("definitions");
+    let live = definitions_dir(data_dir);
     let staging = with_suffix(&live, ".staging");
 
     let result = stage(&body, &staging).and_then(|count| {
@@ -264,6 +306,10 @@ pub const fn should_sync_now(definitions_count: usize) -> bool {
 /// Spawns the background updater. Returns immediately — the caller goes on
 /// to serve requests while this runs.
 ///
+/// Callers that need to honour `definitions_auto_update` — i.e. every real
+/// caller — should use [`spawn_updater_if_enabled`] instead; it wraps this
+/// function with exactly that gate.
+///
 /// The task never fails the process: every error is logged and the previous
 /// definitions stay in place. An instance whose first fetch has not finished
 /// (or has failed) serves normally, with search and `t=caps` degraded for
@@ -311,6 +357,31 @@ pub fn spawn_updater(
             tokio::time::sleep(interval).await;
         }
     });
+}
+
+/// Calls [`spawn_updater`] with the same arguments only when `auto_update`
+/// is `true`; otherwise spawns nothing at all. Returns whether it spawned.
+///
+/// This is the one function that decides whether the process ever makes a
+/// network request for definitions, so the gate lives here rather than as
+/// an `if` at the call site in `main` — an accidentally-deleted `if` in
+/// `main` would otherwise leave the whole test suite green while the binary
+/// silently always fetched, regardless of `definitions_auto_update`.
+#[must_use]
+pub fn spawn_updater_if_enabled(
+    client: reqwest::Client,
+    url: String,
+    data_dir: PathBuf,
+    interval: std::time::Duration,
+    store: crate::definitions::DefinitionStore,
+    sync_immediately: bool,
+    auto_update: bool,
+) -> bool {
+    if !auto_update {
+        return false;
+    }
+    spawn_updater(client, url, data_dir, interval, store, sync_immediately);
+    true
 }
 
 #[cfg(test)]
@@ -380,6 +451,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = extract_definitions(b"this is not a gzip stream", dir.path());
         assert!(matches!(result, Err(SyncError::Archive(_))));
+    }
+
+    #[test]
+    fn definition_file_name_rejects_backslash_traversal() {
+        // Tar entries always use `/`, so this remainder is unreachable from
+        // the pinned default URL — but reachable through `definitions_url`
+        // pointing at a hostile mirror. On a Windows deployment `\` is a
+        // path separator, so accepting this would let `dest.join(name)`
+        // escape the destination directory.
+        let path = Path::new("definitions/v11/..\\..\\evil.yml");
+        assert_eq!(definition_file_name(path), None);
+    }
+
+    #[test]
+    fn definition_file_name_rejects_a_nested_subdirectory() {
+        let path = Path::new("definitions/v11/sub/evil.yml");
+        assert_eq!(definition_file_name(path), None);
+    }
+
+    #[test]
+    fn definition_file_name_rejects_a_second_embedded_v11_marker() {
+        let path = Path::new("definitions/v11/definitions/v11/evil.yml");
+        assert_eq!(definition_file_name(path), None);
+    }
+
+    #[test]
+    fn definition_file_name_accepts_a_plain_file() {
+        let path = Path::new("definitions/v11/alpha.yml");
+        assert_eq!(definition_file_name(path), Some("alpha.yml".to_string()));
     }
 
     #[test]
@@ -577,5 +677,40 @@ mod tests {
     fn an_empty_directory_forces_an_immediate_sync() {
         // A fresh install must not wait a whole interval before it can search.
         assert!(should_sync_now(0));
+    }
+
+    #[tokio::test]
+    async fn spawn_updater_if_enabled_spawns_and_returns_true_when_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::definitions::DefinitionStore::new(dir.path().to_path_buf());
+        let spawned = spawn_updater_if_enabled(
+            reqwest::Client::new(),
+            "http://127.0.0.1:0/definitions.tar.gz".to_string(),
+            dir.path().to_path_buf(),
+            std::time::Duration::from_secs(3600),
+            store,
+            false,
+            true,
+        );
+        assert!(spawned, "auto_update: true must spawn the updater");
+    }
+
+    #[tokio::test]
+    async fn spawn_updater_if_enabled_spawns_nothing_and_returns_false_when_disabled() {
+        // This is the branch deciding whether the binary ever touches the
+        // network at all: a deleted `if` guard here must fail this test,
+        // not merely leave the rest of the suite green.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::definitions::DefinitionStore::new(dir.path().to_path_buf());
+        let spawned = spawn_updater_if_enabled(
+            reqwest::Client::new(),
+            "http://127.0.0.1:0/definitions.tar.gz".to_string(),
+            dir.path().to_path_buf(),
+            std::time::Duration::from_secs(3600),
+            store,
+            false,
+            false,
+        );
+        assert!(!spawned, "auto_update: false must not spawn the updater");
     }
 }
