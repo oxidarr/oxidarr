@@ -1,7 +1,7 @@
 {
   "appName": "Oxidarr",
   "instanceName": "Oxidarr",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "isProduction": true,
   "isDocker": false,
   "startTime": "2024-01-01T00:00:00+00:00",
