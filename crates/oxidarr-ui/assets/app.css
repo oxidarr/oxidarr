@@ -205,8 +205,12 @@ tbody tr:hover td {
 }
 
 /* The status spine. Rows carry their state on the first cell's left edge,
-   which survives border-collapse where a border on the row itself does not. */
-tbody td:first-child {
+   which survives border-collapse where a border on the row itself does not.
+   Scoped to the two tables whose rows actually have a state — on the search
+   results, where nothing is enabled or failing, a grey edge would read as
+   "dormant" and mean nothing. */
+#indexers-screen tbody td:first-child,
+#applications-screen tbody td:first-child {
   border-left: 3px solid var(--line);
 }
 
@@ -230,9 +234,13 @@ tr.is-off td {
    column of numbers scans as a column. Addressed positionally rather than by
    class — the table's column order is fixed by the component that renders it
    (Title, Indexer, Size, Seeders, Leechers, Age, Links). */
+/* Release titles are long unbroken runs with no spaces to break at
+   (Some.Show.S01E01.1080p.WEB-DL.x264-GROUP), so without this the cell
+   refuses to wrap and drags the whole page sideways. */
 #search-results tbody td:nth-child(1) {
   font-weight: 500;
   max-width: 46ch;
+  overflow-wrap: anywhere;
 }
 
 #search-results tbody td:nth-child(3),
@@ -258,11 +266,14 @@ tr.is-off td {
 
 /* Status messages ------------------------------------------------------- */
 
+/* A sync error quotes whatever the remote said, URLs included, so it gets
+   the same unbreakable-string guard the release titles need. */
 .sync-error {
   display: block;
   margin-top: 0.2rem;
   color: var(--oxide);
   font-size: 0.88rem;
+  overflow-wrap: anywhere;
 }
 
 .test-result {
@@ -399,8 +410,11 @@ legend {
   font-size: 0.88rem;
 }
 
-/* Checkbox rows inside a fieldset sit on one line with their own label. */
-fieldset label {
+/* A checkbox and its caption belong on one line, whether the label sits in a
+   fieldset (the search screen's indexer picker) or directly in the form (the
+   indexer form's Enabled toggle). */
+fieldset label,
+form label:has(> input[type="checkbox"]) {
   display: flex;
   align-items: center;
   gap: 0.45rem;
@@ -410,7 +424,8 @@ fieldset label {
   font-size: 13.5px;
 }
 
-fieldset label > input {
+fieldset label > input,
+form label:has(> input[type="checkbox"]) > input {
   display: inline-block;
   width: 1rem;
   margin-top: 0;
