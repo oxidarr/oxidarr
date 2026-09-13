@@ -1,0 +1,214 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  # The compiled wasm bundle is platform-independent. Building it once and
+  # sharing it keeps dioxus-cli off the macOS and Windows runners entirely,
+  # and guarantees all four binaries embed byte-identical assets.
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+          targets: wasm32-unknown-unknown
+      - run: cargo install dioxus-cli --locked --version 0.7.10
+      - run: ./scripts/build-ui.sh
+      # Mirrors ci.yml's `ui` job: this is the only place in the workflow
+      # that actually ships to users that checks the bundle build-ui.sh
+      # just produced is the real thing, not a stale or silently-empty one.
+      - name: Verify the built bundle is real
+        working-directory: crates/oxidarr-prowl
+        run: |
+          grep -q 'id="oxidarr-app"' dist/index.html
+          ! grep -q 'oxidarr-ui-stub' dist/index.html
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-bundle
+          path: crates/oxidarr-prowl/dist
+          if-no-files-found: error
+
+  binaries:
+    needs: bundle
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            archive: tar.gz
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            archive: tar.gz
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      # Must land before cargo build: --features ui embeds this directory
+      # at compile time.
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-bundle
+          path: crates/oxidarr-prowl/dist
+
+      - name: Build
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p oxidarr-prowl --features ui
+          cargo build --release --target ${{ matrix.target }} -p oxidarr-migrate
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          name="oxidarr-${version}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          bindir="target/${{ matrix.target }}/release"
+          for bin in oxidarr-prowl oxidarr-migrate; do
+            if [ -f "${bindir}/${bin}.exe" ]; then
+              cp "${bindir}/${bin}.exe" "dist/${name}/"
+            else
+              cp "${bindir}/${bin}" "dist/${name}/"
+            fi
+          done
+          cp README.md LICENSE crates/oxidarr-ui/assets/PLEX-LICENSE.txt "dist/${name}/"
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            # 7z is present on the Windows runner image today, but it has
+            # gone missing from this exact image before
+            # (actions/runner-images#9361), and this is the one leg we cannot
+            # cheaply dry-run. Compress-Archive ships with PowerShell on every
+            # Windows runner, so fall back to it rather than depending on an
+            # image detail that has flipped once already.
+            if command -v 7z >/dev/null 2>&1; then
+              7z a "${name}.zip" "${name}"
+            else
+              powershell -NoProfile -Command \
+                "Compress-Archive -Path '${name}' -DestinationPath '${name}.zip'"
+            fi
+          else
+            tar czf "${name}.tar.gz" "${name}"
+          fi
+          # Checksums are generated beside each archive so a downloader can
+          # verify without trusting the release page's rendering. `sha256sum`
+          # covers Linux and the Windows runner's Git-Bash coreutils, but
+          # macOS runners ship neither GNU coreutils nor `sha256sum` — only
+          # BSD `shasum`. Fall back to that rather than assuming one command
+          # works everywhere this step runs.
+          for f in "${name}".*; do
+            case "$f" in
+              *.tar.gz|*.zip)
+                if command -v sha256sum >/dev/null 2>&1; then
+                  sha256sum "$f" > "$f.sha256"
+                else
+                  shasum -a 256 "$f" > "$f.sha256"
+                fi
+                ;;
+            esac
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    needs: binaries
+    runs-on: ubuntu-latest
+    # Only this job needs to write (creating the GitHub Release); `bundle`
+    # and `binaries` above only ever read, so they run under the default
+    # read-only token instead of inheriting write access they don't use.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+  # Publishes all nine crates to crates.io. Depends on `release` so a tag
+  # whose binaries failed to build never gets published.
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    # Trusted Publishing (RFC 3691) exchanges this workflow's OIDC identity
+    # for a short-lived crates.io token that is revoked when the job ends —
+    # no long-lived CARGO_REGISTRY_TOKEN is stored in repository secrets.
+    # This only works because this job's trigger is `push: tags` (see the
+    # top of this file). `pull_request_target` and `workflow_run` are
+    # blocked from Trusted Publishing for documented security reasons — do
+    # not move this job onto either of those triggers.
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      # Pinned to a commit, unlike the other two uses of this action in this
+      # file: this is the one job holding `id-token: write` and a live
+      # crates.io token behind an irreversible `cargo publish`, so it does
+      # not get to trust whatever `master` happens to point to on the day a
+      # tag is pushed.
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: "1.95.0"
+          targets: wasm32-unknown-unknown
+      # The bundle must exist before packaging: oxidarr-prowl's `include`
+      # lists dist/**/* and `cargo package` would otherwise omit it. Reuses
+      # the exact bundle the `bundle` job already built and the `binaries`
+      # job already shipped, rather than rebuilding it a third time.
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-bundle
+          path: crates/oxidarr-prowl/dist
+
+      - name: Authenticate with crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      # --workspace resolves the dependency graph and publish order itself;
+      # none of the nine crates are hand-sequenced here.
+      #
+      # --allow-dirty is required here, not optional: the `ui-bundle`
+      # artifact downloaded above lands in crates/oxidarr-prowl/dist, which
+      # is gitignored, so git sees it as uncommitted changes even though
+      # it's the deliberately-downloaded asset this publish needs (see
+      # ci.yml's publish-dry-run job, which passes the same flag against the
+      # same situation). Without it, packaging aborts with "N files in the
+      # working directory contain changes that were not yet committed into
+      # git" — caught only by reproducing the exact command, because the
+      # dry-run gate above already uses --allow-dirty and so never exercised
+      # this path: a dry run is not a rehearsal of the real command unless
+      # the flags match.
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --workspace --allow-dirty

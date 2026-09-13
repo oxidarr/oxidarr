@@ -1,6 +1,6 @@
 //! Fails fast, with an actionable message, when the `ui` feature is enabled
-//! but `crates/oxidarr-ui/dist` hasn't been built yet — instead of leaving
-//! that to `src/ui.rs`'s `include_dir!` macro, whose own panic
+//! but `crates/oxidarr-prowl/dist` hasn't been built yet — instead of
+//! leaving that to `src/ui.rs`'s `include_dir!` macro, whose own panic
 //! (`"... is not a directory"`) gives no hint what to do about it.
 //!
 //! Only acts when Cargo sets `CARGO_FEATURE_UI` (i.e. the `ui` feature is
@@ -25,11 +25,11 @@ fn main() {
     }
 
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let dist = Path::new(manifest_dir).join("../oxidarr-ui/dist");
+    let dist = Path::new(manifest_dir).join("dist");
 
     assert!(
         dist.is_dir(),
-        "the `ui` feature embeds crates/oxidarr-ui/dist at compile time, but that \
+        "the `ui` feature embeds crates/oxidarr-prowl/dist at compile time, but that \
          directory does not exist yet. Run `./scripts/build-ui.sh` from the repo root \
          first, then retry this build — see README.md's \"Web UI\" section."
     );

@@ -1,9 +1,6 @@
 # Oxidarr — Prowlarr-compatible indexer manager.
 #
-# No image is published yet. Build it locally first, under the exact tag
-# this file pins:
-#   docker build -t ghcr.io/oxidarr/oxidarr-prowl:0.1.0 .
-#
+# Pulls the published image at the tag this file pins:
 #   docker compose -p oxidarr -f docs/docker-compose.yml up -d
 #
 # The API key is printed in the logs on first start:

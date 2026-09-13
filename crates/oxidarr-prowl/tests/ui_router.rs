@@ -142,7 +142,7 @@ async fn the_ui_fallback_does_not_shadow_ping() {
 
 /// Proves the *production* embed (`crate::ui::router`, backed by the real
 /// `DIST`) actually serves the real app shell. There is no stub anywhere
-/// in this repository for `crates/oxidarr-ui/dist` — this whole test file
+/// in this repository for `crates/oxidarr-prowl/dist` — this whole test file
 /// only compiles at all once that directory already exists for real (see
 /// `crate::ui`'s own module docs and this crate's `build.rs`), so this
 /// isn't guarding against a *missing* bundle. It's ignored by default
@@ -175,10 +175,7 @@ async fn the_real_embedded_bundle_serves_the_app_shell() {
 #[ignore = "run in the ui CI job right after ./scripts/build-ui.sh — a local dist/ may be stale"]
 #[tokio::test]
 async fn the_real_embedded_bundles_js_and_wasm_assets_have_their_own_content_types() {
-    let assets_dir = PathBuf::from(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../oxidarr-ui/dist/assets"
-    ));
+    let assets_dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/dist/assets"));
     let mut js_name = None;
     let mut wasm_name = None;
     for entry in std::fs::read_dir(&assets_dir).unwrap() {
