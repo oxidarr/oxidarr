@@ -2,7 +2,7 @@
 
 # The toolchain is pinned to the same version CI uses. A floating tag would
 # let the image and CI drift apart silently.
-FROM rust:1.95-bookworm AS builder
+FROM rust:1.95.0-bookworm AS builder
 
 # dioxus-cli compiles from source and is by far the slowest layer, so it is
 # installed before any source is copied and survives every source change.
@@ -38,6 +38,13 @@ COPY --from=builder /src/target/release/oxidarr-migrate /usr/local/bin/
 # a layer to speed up cold start.
 ENV OXIDARR_DATA_DIR=/data
 RUN mkdir -p /data && chown oxidarr:oxidarr /data
+
+# The chown above only seeds ownership for a *named* volume (Docker copies
+# the image directory's contents/ownership into it on first use). A
+# bind-mounted host directory ignores this entirely and keeps the host's
+# ownership instead. If you see EACCES writing oxidarr.db or definitions/
+# after `-v ./data:/data`, run `chown 10001:10001` on that host directory
+# first, or use a named volume as our compose file does.
 VOLUME ["/data"]
 
 USER oxidarr
