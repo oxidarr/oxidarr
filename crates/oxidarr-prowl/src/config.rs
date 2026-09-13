@@ -143,6 +143,8 @@ pub enum ConfigError {
     DefinitionsIntervalParse {
         /// The value that failed to parse.
         value: String,
+        #[source]
+        source: std::num::ParseIntError,
     },
 }
 
@@ -229,7 +231,7 @@ pub fn load_config(
     let definitions_interval = match env("OXIDARR_DEFINITIONS_INTERVAL") {
         Some(value) => value
             .parse::<u64>()
-            .map_err(|_| ConfigError::DefinitionsIntervalParse { value })?,
+            .map_err(|source| ConfigError::DefinitionsIntervalParse { value, source })?,
         None => file
             .definitions_interval
             .unwrap_or(DEFAULT_DEFINITIONS_INTERVAL),
@@ -345,6 +347,9 @@ mod tests {
             external_url = "https://from-file.example.com"
             proxy = "http://from-file-proxy:8080"
             log = "debug"
+            definitions_auto_update = false
+            definitions_interval = 111
+            definitions_url = "https://from-file.example.com/definitions.tar.gz"
             "#,
         )
         .unwrap();
@@ -354,6 +359,11 @@ mod tests {
             "OXIDARR_EXTERNAL_URL" => Some("https://from-env.example.com".to_string()),
             "OXIDARR_PROXY" => Some("socks5://from-env-proxy:1080".to_string()),
             "OXIDARR_LOG" => Some("trace".to_string()),
+            "OXIDARR_DEFINITIONS_AUTO_UPDATE" => Some("true".to_string()),
+            "OXIDARR_DEFINITIONS_INTERVAL" => Some("222".to_string()),
+            "OXIDARR_DEFINITIONS_URL" => {
+                Some("https://from-env.example.com/definitions.tar.gz".to_string())
+            }
             _ => None,
         };
 
@@ -370,6 +380,12 @@ mod tests {
             Some("socks5://from-env-proxy:1080")
         );
         assert_eq!(config.log, "trace");
+        assert!(config.definitions_auto_update);
+        assert_eq!(config.definitions_interval, 222);
+        assert_eq!(
+            config.definitions_url,
+            "https://from-env.example.com/definitions.tar.gz"
+        );
     }
 
     #[test]
@@ -494,7 +510,31 @@ mod tests {
         });
         assert!(matches!(
             result,
-            Err(ConfigError::DefinitionsIntervalParse { ref value }) if value == "daily"
+            Err(ConfigError::DefinitionsIntervalParse { ref value, .. }) if value == "daily"
         ));
+    }
+
+    #[test]
+    fn definitions_file_values_override_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+            definitions_auto_update = false
+            definitions_interval = 43_200
+            definitions_url = "https://mirror.example.com/definitions.tar.gz"
+            "#,
+        )
+        .unwrap();
+
+        let config = load_config(Some(&path), &no_env).unwrap();
+
+        assert!(!config.definitions_auto_update);
+        assert_eq!(config.definitions_interval, 43_200);
+        assert_eq!(
+            config.definitions_url,
+            "https://mirror.example.com/definitions.tar.gz"
+        );
     }
 }
