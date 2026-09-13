@@ -3,6 +3,7 @@ name: Docker
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 
 concurrency:
@@ -28,10 +29,6 @@ jobs:
       - uses: actions/checkout@v5
 
       - uses: docker/setup-buildx-action@v3
-
-      - name: Short SHA
-        id: sha
-        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Sanitise platform for artifact naming
         id: platform
@@ -126,9 +123,21 @@ jobs:
     steps:
       - uses: docker/setup-buildx-action@v3
 
-      - name: Short SHA
-        id: sha
-        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      # This is the only place a tag is attached to the image, and the only
+      # place the full tag set is derived — see the comment on "Create and
+      # push the multi-arch manifest" below for why it lives here rather
+      # than on the build legs.
+      - name: Derive tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/oxidarr/oxidarr-prowl
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=sha-
 
       - name: Log in to ghcr
         uses: docker/login-action@v3
@@ -146,14 +155,20 @@ jobs:
 
       # Each leg pushed its image by digest only, with no tag. This is the
       # one place a tag is attached, and it is attached to a manifest list
-      # spanning both digests, so `:main` and `:sha-<short>` always resolve
-      # to a genuine multi-arch image rather than whichever leg pushed last.
+      # spanning both digests, so every tag `metadata-action` derived above
+      # always resolves to a genuine multi-arch image rather than whichever
+      # leg pushed last.
+      #
+      # `imagetools create` wants tags as repeated `-t` flags, but
+      # `steps.meta.outputs.tags` is a newline-separated string — splitting
+      # that naively (e.g. word-splitting on whitespace) would mangle it.
+      # `metadata-action` also sets `DOCKER_METADATA_OUTPUT_JSON` for
+      # exactly this situation: its `.tags` array can be turned into `-t`
+      # flags with `jq`, which is what this step does.
       - name: Create and push the multi-arch manifest
         run: |
           set -euo pipefail
           cd /tmp/digests
           digests=$(for f in *; do printf 'ghcr.io/oxidarr/oxidarr-prowl@%s ' "$(cat "$f")"; done)
-          docker buildx imagetools create \
-            -t ghcr.io/oxidarr/oxidarr-prowl:main \
-            -t ghcr.io/oxidarr/oxidarr-prowl:sha-${{ steps.sha.outputs.short }} \
-            $digests
+          tags=$(jq -r '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          docker buildx imagetools create $tags $digests
