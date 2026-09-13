@@ -90,3 +90,36 @@ jobs:
         run: cargo test -p oxidarr-prowl --features ui -- --include-ignored
       - name: Build oxidarr-prowl with the ui feature
         run: cargo build -p oxidarr-prowl --features ui
+
+  # `cargo publish` cannot be undone for a given version, and this workspace
+  # publishes nine crates in one command — a manifest error discovered
+  # halfway through leaves some crates at the new version and some not,
+  # permanently. This is the only cheap place to catch that before it
+  # happens for real.
+  publish-dry-run:
+    name: cargo publish --dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+          targets: wasm32-unknown-unknown
+
+      - name: Install dioxus-cli
+        # See the `ui` job above for why RUSTFLAGS is cleared just for this
+        # step: the workflow-level `-D warnings` is meant for this repo's
+        # own crates, not the ~600 third-party crates this install compiles.
+        env:
+          RUSTFLAGS: ""
+        run: cargo install dioxus-cli --locked --version 0.7.10
+
+      # oxidarr-prowl's `include` lists the built bundle, so packaging fails
+      # outright if it has not been built first.
+      - name: Build the web ui bundle
+        run: ./scripts/build-ui.sh
+
+      - name: Dry run
+        run: cargo publish --workspace --dry-run --allow-dirty
