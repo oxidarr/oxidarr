@@ -7,8 +7,8 @@
 //! fetched them by hand with `scripts/fetch-definitions.sh`.
 //!
 //! Every function here takes its inputs explicitly (bytes, paths, a URL) so
-//! the module is testable without a network. [`run_updater`] is the only
-//! part that talks to the outside world.
+//! the module is testable without a network. The background updater added
+//! later in this module is the only part that talks to the outside world.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -96,6 +96,12 @@ pub fn extract_definitions(archive: &[u8], dest: &Path) -> Result<usize, SyncErr
 /// or `None` for anything else — another schema version, a README, a
 /// directory entry. Matches on the marker rather than a fixed top-level
 /// directory because the archive's root is named after the branch.
+#[allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "case sensitivity is intended: DefinitionStore resolves each definition as \
+              <id>.yml exactly, so accepting a .YML entry here would install a file it \
+              could never load on a case-sensitive filesystem"
+)]
 fn definition_file_name(path: &Path) -> Option<String> {
     let text = path.to_str()?;
     let rest = text.split_once(V11_MARKER)?.1;
