@@ -1,0 +1,18 @@
+{
+  "title": "Some.Show.S01E01.1080p",
+  "size": 1073741824,
+  "seeders": null,
+  "leechers": 3,
+  "infoUrl": "https://example.tracker/details/123",
+  "downloadUrl": "https://example.tracker/download/123.torrent",
+  "indexerId": 1,
+  "indexer": "Example Tracker",
+  "categories": [
+    5000,
+    5040
+  ],
+  "publishDate": "2026-01-15T10:30:00Z",
+  "grabs": 42,
+  "downloadVolumeFactor": 1.0,
+  "uploadVolumeFactor": 1.0
+}

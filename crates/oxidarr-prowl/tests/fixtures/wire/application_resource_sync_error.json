@@ -1,0 +1,21 @@
+{
+  "id": 3,
+  "name": "My Sonarr",
+  "implementation": "Sonarr",
+  "syncLevel": "fullSync",
+  "fields": [
+    {
+      "name": "baseUrl",
+      "label": "baseUrl",
+      "type": "textbox",
+      "value": "http://sonarr.example"
+    },
+    {
+      "name": "apiKey",
+      "label": "apiKey",
+      "type": "textbox",
+      "value": "secretkey"
+    }
+  ],
+  "syncError": "unexpected status 500 from http://sonarr.example/api/v3/indexer"
+}

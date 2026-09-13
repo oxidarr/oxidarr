@@ -4,15 +4,17 @@ A Rust implementation of the \*arr stack, aiming for drop-in API compatibility w
 existing applications so the surrounding ecosystem — Bazarr, Jellyseerr, Recyclarr,
 mobile clients, dashboards — keeps working unchanged.
 
-> **Status: Prowlarr-compatible control plane, no UI.** `oxidarr-prowl` is a
-> runnable binary: the Cardigann definition engine, the Newznab/Torznab HTTP
-> layer, a SQLite-backed store, and a Prowlarr-shaped `/api/v1` (application
-> and indexer CRUD, schema, search, health/status) all ship. A real,
-> unmodified Sonarr can add it as an application, sync a Cardigann indexer
-> from it, and search/grab through it — see
-> [End-to-end acceptance](#end-to-end-acceptance-sonarr) below. There is no
-> web UI yet (every `/api/v1` interaction is by `curl`/API client) and no
-> release-engineering (packaging, Docker image, versioned releases).
+> **Status: Prowlarr-compatible control plane, with an optional web UI.**
+> `oxidarr-prowl` is a runnable binary: the Cardigann definition engine, the
+> Newznab/Torznab HTTP layer, a SQLite-backed store, and a Prowlarr-shaped
+> `/api/v1` (application and indexer CRUD, schema, search, health/status)
+> all ship. A real, unmodified Sonarr can add it as an application, sync a
+> Cardigann indexer from it, and search/grab through it — see
+> [End-to-end acceptance](#end-to-end-acceptance-sonarr) below. A Dioxus web
+> UI over that same `/api/v1` surface ships behind the `ui` cargo feature
+> (off by default) — see [Web UI](#web-ui) below; the default, API-only
+> binary is unchanged. There is no release-engineering yet (packaging,
+> Docker image, versioned releases).
 
 ## Why
 
@@ -32,7 +34,7 @@ crates/
   oxidarr-http/        shared axum scaffolding
   oxidarr-prowl/       Prowlarr-compatible app (binary)
   oxidarr-migrate/     standalone schema-migration CLI over oxidarr-db
-  oxidarr-ui/          Dioxus frontend (not wired up yet)
+  oxidarr-ui/          Dioxus frontend over /api/v1 (behind oxidarr-prowl's `ui` feature)
   oxidarr/             empty umbrella crate (crates.io placeholder)
 ```
 
@@ -144,6 +146,84 @@ It needs a working `docker` and network access, and is **not** run in CI:
 
 Run `./scripts/e2e-sonarr.sh --help` for every environment variable it reads (which
 Cardigann definition to add, ports, the Sonarr image, ...).
+
+## Web UI
+
+`oxidarr-ui` is a Dioxus web frontend over the same `/api/v1` surface `oxidarr-prowl`
+serves: indexer and application CRUD, a cross-indexer search screen, and a status page.
+It talks to the server exclusively through that public API — no privileged access — so
+running it doubles as a compatibility check of the API itself. It ships behind the `ui`
+cargo feature, off by default: the plain `cargo build -p oxidarr-prowl` binary (default
+features) from [Quick start](#quick-start) above is completely unaffected by any of this.
+
+**Building the bundle is a hard prerequisite of the `ui` feature, not an optional step.**
+`oxidarr-prowl`'s `ui` feature embeds `crates/oxidarr-ui/dist` into the binary at compile
+time (`include_dir!`); nothing in this repository creates that directory or ships a
+placeholder for it, so enabling the feature (`cargo build`/`check`/`test --features ui`)
+without building it first fails outright, at macro expansion, with a message that gives no
+hint what to do about it:
+
+```
+error: proc macro panicked
+  --> crates/oxidarr-prowl/src/ui.rs:88:29
+   |
+88 | static DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../oxidarr-ui/dist");
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: message: ".../crates/oxidarr-ui/dist" is not a directory
+```
+
+(`crates/oxidarr-prowl/build.rs` catches the same condition earlier, with a one-line panic
+that points back to the command below — but the underlying requirement is identical either
+way.) So: build the bundle first (needs [dioxus-cli](https://dioxuslabs.com) 0.7.10 and the
+`wasm32-unknown-unknown` target):
+
+```sh
+cargo install dioxus-cli --locked --version 0.7.10
+rustup target add wasm32-unknown-unknown
+./scripts/build-ui.sh
+```
+
+That script runs `dx build --release` in `crates/oxidarr-ui` and copies the result into
+`crates/oxidarr-ui/dist` — dioxus-cli 0.7.10's `dx build` does not write there itself for
+a web build (see the script's own comment for exactly where it does write, and why).
+
+> Deno also ships a binary called `dx`, and on a machine where its install directory
+> precedes `~/.cargo/bin` on `PATH` it wins the name. The script checks `dx --version` and
+> uses the first one that identifies itself as `dioxus`, so this resolves itself; set `DX`
+> to an explicit path if yours lives somewhere unusual. Calling `dx build` by hand instead
+> will hit the shadowed binary and fail with `Unable to choose binary for build`.
+>
+> The same ordering affects `rustc`: if a non-rustup Rust (Homebrew's, typically) comes
+> first on `PATH`, `dx` will use it and stop with `Missing rust target
+> wasm32-unknown-unknown` even though `rustup target add` reported success — it added the
+> target to a toolchain that is not the one being run. Put `~/.cargo/bin` first, or run
+> `PATH="$HOME/.cargo/bin:$PATH" ./scripts/build-ui.sh`.
+
+Then run the server with the UI compiled in:
+
+```sh
+cargo run -p oxidarr-prowl --features ui
+```
+
+and open the printed `external url` in a browser. The UI has no login of its own — on
+first load it prompts for the instance's API key, the same one the startup banner prints
+(see step 3 of [Quick start](#quick-start)) — and keeps it in the browser's own storage
+after that, until cleared or until the server answers `401`.
+
+The interface is built around one question: which of your things are working? Every row
+and panel carries a coloured left edge reading healthy, failed, or dormant — a failure
+outranks being disabled, so an indexer that is both still reads as broken. Everything
+around that stays deliberately quiet.
+
+Type is IBM Plex Sans, with IBM Plex Mono reserved for machine data (Torznab URLs, keys,
+sizes, swarm counts). Both are bundled as latin-subset `woff2` files in
+`crates/oxidarr-ui/assets` rather than fetched from a font CDN, since these servers are
+frequently offline; they are licensed under the SIL Open Font License 1.1, included there
+as `PLEX-LICENSE.txt`. The stylesheet is a single file, `assets/app.css`, with the design's
+reasoning in its header comment.
+
+Screenshots will land here once the look has had some use behind it.
 
 ## Building
 

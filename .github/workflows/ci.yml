@@ -23,3 +23,69 @@ jobs:
         run: ./scripts/fetch-definitions.sh
       - name: Test
         run: cargo test --workspace
+
+  # Builds the real `oxidarr-ui` web bundle and the `oxidarr-prowl` binary
+  # that embeds it (the `ui` cargo feature, off by default — see
+  # crates/oxidarr-prowl/src/ui.rs's module docs). Kept separate from
+  # `check` above so the default workspace build/test loop never needs the
+  # wasm32 target or dioxus-cli.
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+      - name: Add the wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install dioxus-cli
+        # The workflow-level `RUSTFLAGS: -D warnings` above is meant for
+        # this repo's own crates, not the ~600 third-party crates this
+        # install compiles — one upstream warning anywhere in that tree
+        # would otherwise kill this job. Scoped to just this step; every
+        # other step keeps the workflow-level `-D warnings`.
+        env:
+          RUSTFLAGS: ""
+        run: cargo install dioxus-cli --version 0.7.10 --locked
+      - name: Build the web ui bundle
+        # Runs `dx build --release` in crates/oxidarr-ui and copies its real
+        # output into crates/oxidarr-ui/dist — see that script's own
+        # comment for why the copy step is needed at all (`dx build` does
+        # not write there itself).
+        run: ./scripts/build-ui.sh
+      - name: Verify the built bundle is real
+        # There is no committed stub anywhere in this repository — the `ui`
+        # feature simply fails to build at all without a prior
+        # ./scripts/build-ui.sh (see src/ui.rs's own module docs and
+        # build.rs). This step instead guards against the previous step
+        # having silently produced a *stale* or wrong bundle (e.g. a cache
+        # restore, or a dx regression that no-ops without erroring): if
+        # dist/index.html doesn't carry the real app's own marker, something
+        # upstream is wrong even though the build itself "succeeded". The
+        # second grep is a tripwire, not a check against anything that
+        # exists today: it fails the build if a placeholder stub (marked
+        # with the literal string "oxidarr-ui-stub") is ever committed to
+        # crates/oxidarr-ui/dist again in the future.
+        working-directory: crates/oxidarr-ui
+        run: |
+          grep -q 'id="oxidarr-app"' dist/index.html
+          ! grep -q 'oxidarr-ui-stub' dist/index.html
+      - name: Force a rebuild of the embedded ui bundle
+        # `include_dir!` only calls `tracked_path::path` (the thing that
+        # would tell cargo/rustc "recompile if this file changes") behind
+        # its `nightly` feature, which this workspace doesn't enable —
+        # verified by reading `macros/src/lib.rs` at
+        # `include_dir_macros-v0.7.4` in the `Michael-F-Bryan/include_dir`
+        # repo. On stable, writing a new `dist/` here gives cargo no
+        # signal at all; a Swatinem/rust-cache-restored `oxidarr-prowl`
+        # build could silently keep whatever was embedded on a *previous*
+        # run (stub or otherwise) even though `dx build` just ran. Bumping
+        # the mtime of the one source file that invokes the macro forces
+        # rustc to reprocess it against the bundle just built above.
+        run: touch crates/oxidarr-prowl/src/ui.rs
+      - name: Test oxidarr-prowl with the ui feature
+        # --include-ignored runs tests/ui_router.rs's
+        # the_real_embedded_bundle_serves_the_app_shell, which asserts on
+        # the real DIST embed (not the fixture) and is ignored everywhere
+        # else because only this job has a real `dx build` behind it.
+        run: cargo test -p oxidarr-prowl --features ui -- --include-ignored
+      - name: Build oxidarr-prowl with the ui feature
+        run: cargo build -p oxidarr-prowl --features ui

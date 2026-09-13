@@ -1,0 +1,599 @@
+/* Oxidarr operator console.
+ *
+ * The name is the design: oxidation is what metal does over time, and every
+ * object in this app is in one of the states metal has — healthy patina,
+ * active corrosion, or dormant. State is therefore carried by colour on a
+ * cold-steel ground, and the carrier is the status spine: the 3px left edge
+ * on every row and panel. Patina means working, oxide means failed, dim
+ * steel means disabled. It is the fastest scan in the product, which is the
+ * one question an operator actually opens this page to answer.
+ *
+ * Everything else stays quiet: no shadows, no gradients, one radius.
+ *
+ * The fonts are bundled rather than fetched. This app runs on home servers
+ * that are frequently offline; a webfont CDN would be a broken link exactly
+ * where the app lives. They are IBM Plex Sans and IBM Plex Mono, latin
+ * subsets, under the SIL Open Font License 1.1 — see PLEX-LICENSE.txt
+ * beside them. */
+
+@font-face {
+  font-family: "Plex Sans";
+  src: url("/assets/plex-sans.woff2") format("woff2");
+  font-weight: 400 600;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Plex Mono";
+  src: url("/assets/plex-mono.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+
+:root {
+  --ground: #101619;
+  --surface: #182125;
+  --surface-lift: #1e292e;
+  --line: #253238;
+  --ink: #dbe4e5;
+  --ink-dim: #7f9297;
+  --patina: #46b49b;
+  --oxide: #c8552e;
+  --heat: #d9a441;
+
+  --rail: 13.5rem;
+  --radius: 2px;
+
+  --sans: "Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 13.5px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* dioxus-web mounts by appending into #oxidarr-app rather than clearing it,
+   so index.html's pre-wasm message lives in a sibling and hides the moment
+   real content lands. */
+#oxidarr-loading {
+  padding: 3rem;
+  color: var(--ink-dim);
+  font-family: var(--sans);
+}
+
+#oxidarr-app:not(:empty) ~ #oxidarr-loading {
+  display: none;
+}
+
+#oxidarr-app {
+  display: grid;
+  grid-template-columns: var(--rail) minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+/* Type ------------------------------------------------------------------ */
+
+h1 {
+  margin: 0;
+  font-size: 1.55rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+}
+
+h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+p {
+  margin: 0 0 1rem;
+  max-width: 62ch;
+  color: var(--ink-dim);
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 0.94em;
+}
+
+a {
+  color: var(--patina);
+}
+
+:focus-visible {
+  outline: 2px solid var(--patina);
+  outline-offset: 2px;
+}
+
+/* Rail ------------------------------------------------------------------ */
+
+nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 1.35rem 0.85rem;
+  background: #0c1114;
+  border-right: 1px solid var(--line);
+}
+
+.wordmark {
+  display: block;
+  margin: 0 0.65rem 1.6rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
+nav a {
+  padding: 0.4rem 0.65rem;
+  border-left: 3px solid transparent;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  color: var(--ink-dim);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+nav a:hover {
+  background: var(--surface);
+  color: var(--ink);
+}
+
+nav a[aria-current="page"] {
+  border-left-color: var(--patina);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+main {
+  padding: 1.75rem 2rem 4rem;
+  min-width: 0;
+}
+
+/* Screen headers -------------------------------------------------------- */
+
+.screen-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.35rem;
+}
+
+/* Tables ---------------------------------------------------------------- */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+thead th {
+  padding: 0 0.75rem 0.55rem;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-dim);
+  font-size: 0.82rem;
+  font-weight: 500;
+  text-align: left;
+}
+
+tbody td {
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+
+tbody tr:hover td {
+  background: var(--surface);
+}
+
+/* The status spine. Rows carry their state on the first cell's left edge,
+   which survives border-collapse where a border on the row itself does not. */
+tbody td:first-child {
+  border-left: 3px solid var(--line);
+}
+
+tr.is-live td:first-child {
+  border-left-color: var(--patina);
+}
+
+tr.is-failed td:first-child {
+  border-left-color: var(--oxide);
+}
+
+tr.is-off td:first-child {
+  border-left-color: #2f3d43;
+}
+
+tr.is-off td {
+  color: var(--ink-dim);
+}
+
+/* Search results: machine data (size, swarm counts, age) reads as mono so a
+   column of numbers scans as a column. Addressed positionally rather than by
+   class — the table's column order is fixed by the component that renders it
+   (Title, Indexer, Size, Seeders, Leechers, Age, Links). */
+#search-results tbody td:nth-child(1) {
+  font-weight: 500;
+  max-width: 46ch;
+}
+
+#search-results tbody td:nth-child(3),
+#search-results tbody td:nth-child(4),
+#search-results tbody td:nth-child(5),
+#search-results tbody td:nth-child(6) {
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+#search-results tbody td:nth-child(4) {
+  color: var(--patina);
+}
+
+#search-results tbody td:nth-child(5),
+#search-results tbody td:nth-child(6) {
+  color: var(--ink-dim);
+}
+
+#search-results tbody td:nth-child(7) a + a {
+  margin-left: 0.6rem;
+}
+
+/* Status messages ------------------------------------------------------- */
+
+.sync-error {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--oxide);
+  font-size: 0.88rem;
+}
+
+.test-result {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.88rem;
+}
+
+.test-result-ok {
+  color: var(--patina);
+}
+
+.test-result-failed {
+  color: var(--oxide);
+}
+
+.form-errors {
+  margin: 0 0 1.1rem;
+  padding: 0.7rem 0.95rem 0.7rem 2rem;
+  max-width: 34rem;
+  border: 1px solid rgba(200, 85, 46, 0.45);
+  border-left: 3px solid var(--oxide);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: rgba(200, 85, 46, 0.09);
+  color: #f0c3b1;
+}
+
+/* Controls -------------------------------------------------------------- */
+
+button {
+  padding: 0.34rem 0.72rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+button:hover {
+  background: var(--surface-lift);
+  border-color: #32434a;
+}
+
+button.primary {
+  border-color: transparent;
+  background: var(--patina);
+  color: #08100e;
+}
+
+button.primary:hover {
+  background: #52c6ac;
+}
+
+button.danger {
+  border-color: transparent;
+  background: var(--oxide);
+  color: #120602;
+}
+
+button.danger:hover {
+  background: #d9663e;
+}
+
+button.quiet {
+  border-color: transparent;
+  background: none;
+  color: var(--ink-dim);
+  padding-inline: 0.4rem;
+}
+
+button.quiet:hover {
+  background: var(--surface-lift);
+  color: var(--ink);
+}
+
+td button + button {
+  margin-left: 0.3rem;
+}
+
+input,
+select {
+  padding: 0.36rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #0c1114;
+  color: var(--ink);
+  font: inherit;
+}
+
+input[type="checkbox"] {
+  accent-color: var(--patina);
+  width: 1rem;
+  height: 1rem;
+}
+
+input:focus,
+select:focus {
+  border-color: var(--patina);
+}
+
+/* Forms are written as `label { "Name" input { .. } }` — the label wraps its
+   own control, so the label text is the dim caption and the control below it
+   carries the ink. No wrapper divs needed. */
+form label {
+  display: block;
+  margin-bottom: 0.9rem;
+  max-width: 34rem;
+  color: var(--ink-dim);
+  font-size: 0.88rem;
+}
+
+form label > input,
+form label > select {
+  display: block;
+  width: 100%;
+  margin-top: 0.25rem;
+  color: var(--ink);
+  font-size: 13.5px;
+}
+
+fieldset {
+  margin: 0 0 1.1rem;
+  padding: 0.85rem 1rem 0.95rem;
+  max-width: 34rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+legend {
+  padding: 0 0.4rem;
+  color: var(--ink-dim);
+  font-size: 0.88rem;
+}
+
+/* Checkbox rows inside a fieldset sit on one line with their own label. */
+fieldset label {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 0.3rem;
+  max-width: none;
+  color: var(--ink);
+  font-size: 13.5px;
+}
+
+fieldset label > input {
+  display: inline-block;
+  width: 1rem;
+  margin-top: 0;
+}
+
+.hint {
+  margin: 0.3rem 0 0;
+  color: var(--ink-dim);
+  font-size: 0.82rem;
+}
+
+form > button {
+  margin: 0.35rem 0.4rem 0 0;
+}
+
+/* Definition lists (status screen) -------------------------------------- */
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.45rem 1.5rem;
+  margin: 0 0 1.75rem;
+  max-width: 46rem;
+}
+
+dt {
+  color: var(--ink-dim);
+  font-weight: 400;
+}
+
+dd {
+  margin: 0;
+  font-family: var(--mono);
+}
+
+/* Banner ---------------------------------------------------------------- */
+
+/* The banner is a direct child of the app's own grid (App renders it beside
+   the router, not inside a screen), so without this it would be placed into
+   the rail column and push the nav and main content down a row. */
+.banner {
+  grid-column: 1 / -1;
+  margin: 1rem 1.25rem 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.35rem;
+  padding: 0.7rem 0.95rem;
+  border: 1px solid rgba(200, 85, 46, 0.45);
+  border-left: 3px solid var(--oxide);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: rgba(200, 85, 46, 0.09);
+  color: #f0c3b1;
+}
+
+/* Key prompt ------------------------------------------------------------ */
+
+body:has(#key-prompt) #oxidarr-app,
+#oxidarr-app:has(#key-prompt) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+#key-prompt {
+  max-width: 27rem;
+  margin: 18vh auto 0;
+  padding: 1.6rem 1.75rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--patina);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: var(--surface);
+}
+
+#key-prompt h1 {
+  font-size: 1.25rem;
+  margin-bottom: 0.4rem;
+}
+
+#key-prompt form {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1.1rem;
+}
+
+#key-prompt input {
+  flex: 1;
+  font-family: var(--mono);
+}
+
+/* Torznab URL list (status screen) -------------------------------------- */
+
+#status-screen ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-width: 52rem;
+}
+
+#status-screen li {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+  border-left: 3px solid var(--patina);
+}
+
+#status-screen li:hover {
+  background: var(--surface);
+}
+
+#status-screen li > span {
+  flex: 0 0 auto;
+  font-weight: 500;
+}
+
+#status-screen li > code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  color: var(--ink-dim);
+}
+
+/* Empty states ---------------------------------------------------------- */
+
+#search-results > p,
+#status-screen ul:empty::after {
+  display: block;
+  padding: 1.5rem 0 0;
+  color: var(--ink-dim);
+}
+
+#status-screen ul:empty::after {
+  content: "No indexers yet. Add one to get a Torznab URL.";
+  padding: 0;
+}
+
+/* Responsive ------------------------------------------------------------ */
+
+@media (max-width: 46rem) {
+  #oxidarr-app {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    align-items: center;
+    padding: 0.8rem 1rem;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .wordmark {
+    margin: 0 0.9rem 0 0;
+  }
+
+  nav a {
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: var(--radius);
+  }
+
+  nav a[aria-current="page"] {
+    border-left: 0;
+    border-bottom-color: var(--patina);
+  }
+
+  main {
+    padding: 1.25rem 1rem 3rem;
+  }
+
+  table {
+    display: block;
+    overflow-x: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}

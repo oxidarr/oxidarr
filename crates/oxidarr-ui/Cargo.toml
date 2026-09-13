@@ -8,7 +8,35 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lib]
+name = "oxidarr_ui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oxidarr-ui"
+path = "src/main.rs"
+
 [dependencies]
+dioxus = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+chrono = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo-net = { workspace = true }
+gloo-storage = { workspace = true }
+web-sys = { version = "0.3", features = ["Window", "Location", "Navigator", "Clipboard"] }
+# `Utc::now()` (called once per search, in `crate::screens::search::Search`,
+# to render each result's own age) needs this feature on `wasm32-unknown-unknown`:
+# without it, `chrono`'s `clock` feature falls back to `std::time::SystemTime`,
+# which panics at runtime on this target (it compiles, so `cargo check` stays
+# clean either way, but only `wasmbind` makes the real browser build work).
+chrono = { workspace = true, features = ["wasmbind"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+dioxus = { workspace = true, features = ["ssr"] }
 
 [lints]
 workspace = true
