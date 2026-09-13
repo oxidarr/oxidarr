@@ -4,9 +4,6 @@ on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
-
 jobs:
   # The compiled wasm bundle is platform-independent. Building it once and
   # sharing it keeps dioxus-cli off the macOS and Windows runners entirely,
@@ -21,6 +18,14 @@ jobs:
           targets: wasm32-unknown-unknown
       - run: cargo install dioxus-cli --locked --version 0.7.10
       - run: ./scripts/build-ui.sh
+      # Mirrors ci.yml's `ui` job: this is the only place in the workflow
+      # that actually ships to users that checks the bundle build-ui.sh
+      # just produced is the real thing, not a stale or silently-empty one.
+      - name: Verify the built bundle is real
+        working-directory: crates/oxidarr-prowl
+        run: |
+          grep -q 'id="oxidarr-app"' dist/index.html
+          ! grep -q 'oxidarr-ui-stub' dist/index.html
       - uses: actions/upload-artifact@v4
         with:
           name: ui-bundle
@@ -133,6 +138,11 @@ jobs:
   release:
     needs: binaries
     runs-on: ubuntu-latest
+    # Only this job needs to write (creating the GitHub Release); `bundle`
+    # and `binaries` above only ever read, so they run under the default
+    # read-only token instead of inheriting write access they don't use.
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -162,7 +172,12 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@master
+      # Pinned to a commit, unlike the other two uses of this action in this
+      # file: this is the one job holding `id-token: write` and a live
+      # crates.io token behind an irreversible `cargo publish`, so it does
+      # not get to trust whatever `master` happens to point to on the day a
+      # tag is pushed.
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
         with:
           toolchain: "1.95.0"
           targets: wasm32-unknown-unknown

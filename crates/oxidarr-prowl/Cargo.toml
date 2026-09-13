@@ -1,6 +1,7 @@
 [package]
 name = "oxidarr-prowl"
 description = "Prowlarr-compatible indexer manager, in Rust"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -32,6 +33,7 @@ include = [
     "src/**/*",
     "build.rs",
     "Cargo.toml",
+    "README.md",
     "tests/**/*",
     "dist/**/*",
 ]

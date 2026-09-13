@@ -2,7 +2,9 @@
 **/*.rs.bk
 *.pdb
 
-# sqlx offline query cache is committed on purpose; local db files are not
+# local db files are not committed (there is no sqlx offline query cache
+# in this repo yet — no .sqlx directory, no query! macros — this just
+# keeps ad-hoc sqlite files out of git)
 *.db
 *.db-shm
 *.db-wal
