@@ -1,12 +1,42 @@
 [package]
 name = "oxidarr-prowl"
 description = "Prowlarr-compatible indexer manager, in Rust"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+
+# crates/oxidarr-prowl/dist (the built oxidarr-ui web bundle, copied here by
+# scripts/build-ui.sh) is gitignored, and `cargo package` excludes
+# gitignored files, so without this an installed oxidarr-prowl fails at
+# macro expansion the moment `--features ui` is enabled: include_dir! finds
+# no directory to embed. Listing the bundle explicitly is what makes
+# `cargo install oxidarr-prowl --features ui` work for someone who has
+# never cloned this repository. Run scripts/build-ui.sh before packaging.
+#
+# `include` becomes the *complete* allowlist for this crate once set — cargo
+# does not merge it with the implicit "everything git-tracks" default, so
+# `tests/**/*` is listed too (dropping it silently broke every integration
+# test in a published sdist; `cargo package` only warns about this, it does
+# not fail the build). Verified against a real packaged crate, not assumed:
+# `cargo package -p oxidarr-prowl --allow-dirty --no-verify` followed by
+# `tar tzf target/package/oxidarr-prowl-<version>.crate` must show `dist/`'s
+# contents landing at `oxidarr-prowl-<version>/dist/...` — this crate's own
+# package root, not a sibling path — because `cargo package` can never
+# include anything reached through `..`; a path outside the package root is
+# silently dropped, not an error, so this is easy to get wrong without
+# checking the actual tarball.
+include = [
+    "src/**/*",
+    "build.rs",
+    "Cargo.toml",
+    "README.md",
+    "tests/**/*",
+    "dist/**/*",
+]
 
 [lib]
 name = "oxidarr_prowl"
@@ -43,8 +73,8 @@ tempfile = { workspace = true }
 [features]
 # Embeds and serves the `oxidarr-ui` web bundle at `/` — see
 # `src/ui.rs`'s module docs. Off by default: no test outside this feature
-# needs a wasm toolchain or crates/oxidarr-ui/dist at all. Enabling it is a
-# hard prerequisite, not an option — `crates/oxidarr-ui/dist` must already
+# needs a wasm toolchain or crates/oxidarr-prowl/dist at all. Enabling it is a
+# hard prerequisite, not an option — `crates/oxidarr-prowl/dist` must already
 # exist (run `./scripts/build-ui.sh` first; see README.md's "Web UI"
 # section) or the build fails, caught early with an actionable message by
 # `build.rs`, or otherwise later by `include_dir!`'s own much less clear

@@ -2,7 +2,9 @@
 **/*.rs.bk
 *.pdb
 
-# sqlx offline query cache is committed on purpose; local db files are not
+# local db files are not committed (there is no sqlx offline query cache
+# in this repo yet — no .sqlx directory, no query! macros — this just
+# keeps ad-hoc sqlite files out of git)
 *.db
 *.db-shm
 *.db-wal
@@ -10,6 +12,12 @@
 # dioxus
 /dist
 .dioxus/
+
+# oxidarr-ui web bundle, copied here by scripts/build-ui.sh — see
+# crates/oxidarr-prowl/src/ui.rs's module docs for why it lives inside
+# oxidarr-prowl (not oxidarr-ui) rather than being covered by the root
+# `/dist` above, which only anchors to the repo root, not this crate subdir
+/crates/oxidarr-prowl/dist
 
 # local working notes, never published
 /.local/

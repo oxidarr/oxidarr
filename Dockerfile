@@ -12,7 +12,7 @@ RUN cargo install dioxus-cli --locked --version 0.7.10 \
 WORKDIR /src
 COPY . .
 
-# --features ui embeds crates/oxidarr-ui/dist at compile time, so the bundle
+# --features ui embeds crates/oxidarr-prowl/dist at compile time, so the bundle
 # must exist before cargo build runs or the build fails at macro expansion.
 RUN ./scripts/build-ui.sh \
     && cargo build --release -p oxidarr-prowl --features ui \

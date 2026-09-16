@@ -13,10 +13,8 @@ mobile clients, dashboards — keeps working unchanged.
 > [End-to-end acceptance](#end-to-end-acceptance-sonarr) below. A Dioxus web
 > UI over that same `/api/v1` surface ships behind the `ui` cargo feature
 > (off by default) — see [Web UI](#web-ui) below; the default, API-only
-> binary is unchanged. Packaging exists in-repo — a `Dockerfile` and a
-> [Docker](#docker) compose file — but no image is published anywhere yet and there
-> are no versioned releases, so running the compose file today means building that
-> image yourself first.
+> binary is unchanged. See [Installation](#installation) below for the
+> three supported ways to run it.
 
 ## Why
 
@@ -64,6 +62,32 @@ once the new one is fully downloaded and extracted. Set
 directory back to yourself — in that case fetch it by hand with
 `scripts/fetch-definitions.sh <dest>` (default dest: `.definitions`), as shown in
 step 2 below.
+
+## Installation
+
+Three ways to get `oxidarr-prowl` running, in the order a newcomer should try them.
+All three fetch Cardigann definitions themselves at runtime — see
+[Definitions](#definitions) above — so none of them, nor the container image, ship
+any third-party indexer definitions.
+
+1. **Docker (recommended).** [`docs/docker-compose.yml`](docs/docker-compose.yml) is a
+   ready-to-use compose file pinned to a released image tag. See [Docker](#docker) below
+   for the exact commands and the environment variables worth setting before first start.
+
+2. **A prebuilt binary.** Download the archive for your platform from the
+   [releases page](https://github.com/oxidarr/oxidarr/releases), verify it against the
+   `.sha256` file next to it, and extract it — no Rust toolchain required. It contains
+   `oxidarr-prowl` (built with the `ui` feature, so the web UI is included) and
+   `oxidarr-migrate`.
+
+3. **`cargo install`,** for a Rust toolchain that is already set up:
+
+   ```sh
+   cargo install oxidarr-prowl --features ui
+   ```
+
+   The `ui` feature is what includes the web interface (see [Web UI](#web-ui) below);
+   omit it for an API-only install.
 
 ## Quick start
 
@@ -175,10 +199,6 @@ Cardigann definition to add, ports, the Sonarr image, ...).
 ## Docker
 
 ```sh
-# No image is published yet. Build it locally first, under the exact tag
-# the compose file pins:
-docker build -t ghcr.io/oxidarr/oxidarr-prowl:0.1.0 .
-
 docker compose -p oxidarr -f docs/docker-compose.yml up -d
 docker compose -p oxidarr -f docs/docker-compose.yml logs | grep 'api key'
 ```
@@ -228,7 +248,7 @@ cargo feature, off by default: the plain `cargo build -p oxidarr-prowl` binary (
 features) from [Quick start](#quick-start) above is completely unaffected by any of this.
 
 **Building the bundle is a hard prerequisite of the `ui` feature, not an optional step.**
-`oxidarr-prowl`'s `ui` feature embeds `crates/oxidarr-ui/dist` into the binary at compile
+`oxidarr-prowl`'s `ui` feature embeds `crates/oxidarr-prowl/dist` into the binary at compile
 time (`include_dir!`); nothing in this repository creates that directory or ships a
 placeholder for it, so enabling the feature (`cargo build`/`check`/`test --features ui`)
 without building it first fails outright, at macro expansion, with a message that gives no
@@ -236,12 +256,12 @@ hint what to do about it:
 
 ```
 error: proc macro panicked
-  --> crates/oxidarr-prowl/src/ui.rs:88:29
+  --> crates/oxidarr-prowl/src/ui.rs:99:29
    |
-88 | static DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../oxidarr-ui/dist");
-   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+99 | static DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/dist");
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = help: message: ".../crates/oxidarr-ui/dist" is not a directory
+   = help: message: ".../crates/oxidarr-prowl/dist" is not a directory
 ```
 
 (`crates/oxidarr-prowl/build.rs` catches the same condition earlier, with a one-line panic
@@ -256,8 +276,11 @@ rustup target add wasm32-unknown-unknown
 ```
 
 That script runs `dx build --release` in `crates/oxidarr-ui` and copies the result into
-`crates/oxidarr-ui/dist` — dioxus-cli 0.7.10's `dx build` does not write there itself for
-a web build (see the script's own comment for exactly where it does write, and why).
+`crates/oxidarr-prowl/dist` — dioxus-cli 0.7.10's `dx build` does not write there itself for
+a web build (see the script's own comment for exactly where it does write, and why), and the
+bundle lives inside `oxidarr-prowl` rather than next to the frontend that produces it so
+`cargo package` can ship it inside the crate that actually embeds it (see that crate's
+`Cargo.toml`).
 
 > Deno also ships a binary called `dx`, and on a machine where its install directory
 > precedes `~/.cargo/bin` on `PATH` it wins the name. The script checks `dx --version` and

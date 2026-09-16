@@ -37,21 +37,32 @@
 //!
 //! # The embedded directory
 //!
-//! [`DIST`] embeds `$CARGO_MANIFEST_DIR/../oxidarr-ui/dist` — the output
-//! directory `crates/oxidarr-ui/Dioxus.toml` configures for `dx build`.
+//! [`DIST`] embeds `$CARGO_MANIFEST_DIR/dist` — i.e. `crates/oxidarr-prowl/
+//! dist`, not `crates/oxidarr-ui`'s own directory. `./scripts/build-ui.sh`
+//! runs `dx build` in `crates/oxidarr-ui` (whose `Dioxus.toml` configures
+//! `dx build`'s own output location) and then copies the result here — see
+//! that script's own comment for why the copy is needed at all, and why the
+//! bundle lives inside this crate rather than next to the frontend that
+//! produces it: `include_dir!`'s argument is resolved at compile time
+//! relative to *this* crate's manifest, and a published `.crate` can only
+//! ever contain files from within its own package root — `cargo package`
+//! silently drops anything reached via `..` (verified against a real
+//! packaged crate, not assumed; see `Cargo.toml`'s `include` comment). A
+//! path one directory above `oxidarr-prowl` would therefore never survive
+//! `cargo install oxidarr-prowl --features ui` for anyone who never cloned
+//! this repository, regardless of what `Cargo.toml` says.
+//!
 //! That directory does not exist until `crates/oxidarr-ui` has actually
-//! been built (`./scripts/build-ui.sh`, or `dx build` plus that script's
-//! own copy step — see its comment for why the copy is needed at all); CI's
-//! `ui` job runs it before building/testing this crate with `--features
-//! ui`. There is no placeholder or stub shipped anywhere in this
-//! repository for that directory (a build script fabricating one would
-//! defeat the "is this the real bundle" check below and in CI) — enabling
-//! `ui` without having built it first is a hard build failure: `build.rs`
-//! catches it early with a one-line panic pointing at
-//! `./scripts/build-ui.sh`; absent that, `include_dir!` itself fails the
-//! same way but with a far less clear message (`"... is not a
-//! directory"`). See this repository's own README.md ("Web UI" section)
-//! for the full story.
+//! been built (`./scripts/build-ui.sh`); CI's `ui` job runs it before
+//! building/testing this crate with `--features ui`. There is no
+//! placeholder or stub shipped anywhere in this repository for that
+//! directory (a build script fabricating one would defeat the "is this the
+//! real bundle" check below and in CI) — enabling `ui` without having built
+//! it first is a hard build failure: `build.rs` catches it early with a
+//! one-line panic pointing at `./scripts/build-ui.sh`; absent that,
+//! `include_dir!` itself fails the same way but with a far less clear
+//! message (`"... is not a directory"`). See this repository's own
+//! README.md ("Web UI" section) for the full story.
 //!
 //! `include_dir!` gives cargo/rustc no signal that this directory's
 //! *contents* ever changed — it only calls `tracked_path::path` (the API
@@ -71,7 +82,7 @@
 //! [`DIST`] directly, so this module's own tests exercise the exact same
 //! serving logic against `tests/fixtures/ui-bundle` — a small hand-written
 //! bundle committed to this repo — without ever touching
-//! `crates/oxidarr-ui/dist`. `tests/ui_router.rs` (an external integration
+//! `crates/oxidarr-prowl/dist`. `tests/ui_router.rs` (an external integration
 //! test, since it needs this crate's full [`crate::server::app`]
 //! composition) instead proves route *precedence* against the real,
 //! feature-gated [`router`] — see that file's own docs.
@@ -85,7 +96,7 @@ use include_dir::{Dir, File, include_dir};
 
 /// The production web UI bundle, embedded at compile time. See the module
 /// docs' "The embedded directory" section.
-static DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../oxidarr-ui/dist");
+static DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/dist");
 
 /// Builds the production web UI router: [`DIST`] served through
 /// [`router_from_dir`]. Merge this into an existing [`Router`] — see the

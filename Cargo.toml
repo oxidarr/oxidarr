@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "GPL-3.0-only"
@@ -12,11 +12,11 @@ authors = ["Filipe Brito Ferreira"]
 
 [workspace.dependencies]
 # internal
-oxidarr-core = { path = "crates/oxidarr-core", version = "0.0.0" }
-oxidarr-db = { path = "crates/oxidarr-db", version = "0.0.0" }
-oxidarr-cardigann = { path = "crates/oxidarr-cardigann", version = "0.0.0" }
-oxidarr-indexer = { path = "crates/oxidarr-indexer", version = "0.0.0" }
-oxidarr-http = { path = "crates/oxidarr-http", version = "0.0.0" }
+oxidarr-core = { path = "crates/oxidarr-core", version = "0.1.0" }
+oxidarr-db = { path = "crates/oxidarr-db", version = "0.1.0" }
+oxidarr-cardigann = { path = "crates/oxidarr-cardigann", version = "0.1.0" }
+oxidarr-indexer = { path = "crates/oxidarr-indexer", version = "0.1.0" }
+oxidarr-http = { path = "crates/oxidarr-http", version = "0.1.0" }
 
 # runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
